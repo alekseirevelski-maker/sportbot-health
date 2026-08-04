@@ -1,0 +1,214 @@
+=== СХЕМА БАЗЫ ДАННЫХ (sport_health.db) ===
+
+-- ТАБЛИЦА: alerts
+  id                           INTEGER  cid=0 notnull=0
+  athlete_id                   INTEGER  cid=1 notnull=1
+  alert_date                   DATE  cid=2 notnull=1
+  metric_type                  TEXT  cid=3 notnull=1
+  value                        REAL  cid=4 notnull=0
+  threshold                    REAL  cid=5 notnull=0
+  severity                     TEXT  cid=6 notnull=1
+  is_read                      INTEGER  cid=7 notnull=0
+  created_at                   TIMESTAMP  cid=8 notnull=0
+-- КОМАНДЫ (распределение):
+
+-- ТАБЛИЦА: athletes
+  id                           INTEGER  cid=0 notnull=0
+  telegram_id                  INTEGER  cid=1 notnull=1
+  username                     TEXT  cid=2 notnull=0
+  full_name                    TEXT  cid=3 notnull=1
+  age_group                    TEXT  cid=4 notnull=1
+  created_at                   TIMESTAMP  cid=5 notnull=0
+  last_active                  DATE  cid=6 notnull=0
+  survey_streak                INTEGER  cid=7 notnull=0
+  total_surveys                INTEGER  cid=8 notnull=0
+  team                         TEXT  cid=9 notnull=1
+  gender                       TEXT  cid=10 notnull=0
+  cycle_length                 INTEGER  cid=11 notnull=0
+  cycle_length_default         INTEGER  cid=12 notnull=0
+-- КОМАНДЫ (распределение):
+   ЧБК-2: 13
+   Курчатов: 7
+   Славянка ЧКПЗ: 2
+   Студ. сборная ЧО: 2
+   Славянка ЧКПЗ-2: 1
+   Челбаскет: 1
+
+-- ТАБЛИЦА: banned_athletes
+  athlete_id                   INTEGER  cid=0 notnull=0
+  banned_at                    TIMESTAMP  cid=1 notnull=0
+  banned_by                    INTEGER  cid=2 notnull=0
+  reason                       TEXT  cid=3 notnull=0
+-- КОМАНДЫ (распределение):
+
+-- ТАБЛИЦА: bot_settings
+  key                          TEXT  cid=0 notnull=0
+  value                        TEXT  cid=1 notnull=1
+-- КОМАНДЫ (распределение):
+
+-- ТАБЛИЦА: daily_wellness
+  id                           INTEGER  cid=0 notnull=0
+  athlete_id                   INTEGER  cid=1 notnull=1
+  survey_date                  DATE  cid=2 notnull=1
+  protocol_type                TEXT  cid=3 notnull=0
+  sleep_score                  INTEGER  cid=4 notnull=0
+  stress_score                 INTEGER  cid=5 notnull=0
+  fatigue_score                INTEGER  cid=6 notnull=0
+  muscle_soreness              INTEGER  cid=7 notnull=0
+  mood_score                   INTEGER  cid=8 notnull=0
+  resting_hr                   INTEGER  cid=9 notnull=0
+  hrv_ms                       REAL  cid=10 notnull=0
+  had_training                 INTEGER  cid=11 notnull=0
+  sRPE_score                   INTEGER  cid=12 notnull=0
+  menstrual_day                INTEGER  cid=13 notnull=0
+  menstrual_phase              TEXT  cid=14 notnull=0
+  auto_recommendation          TEXT  cid=15 notnull=0
+  created_at                   TIMESTAMP  cid=16 notnull=0
+  cycle_day                    INTEGER  cid=17 notnull=0
+  cycle_length                 INTEGER  cid=18 notnull=0
+  cycle_phase                  TEXT  cid=19 notnull=0
+  complaints                   TEXT  cid=20 notnull=0
+-- КОМАНДЫ (распределение):
+   all: 115
+
+-- ТАБЛИЦА: daily_wellness_new
+  id                           INTEGER  cid=0 notnull=0
+  athlete_id                   INTEGER  cid=1 notnull=1
+  survey_date                  DATE  cid=2 notnull=1
+  protocol_type                TEXT  cid=3 notnull=1
+  sleep_score                  INTEGER  cid=4 notnull=0
+  stress_score                 INTEGER  cid=5 notnull=0
+  fatigue_score                INTEGER  cid=6 notnull=0
+  muscle_soreness              INTEGER  cid=7 notnull=0
+  mood_score                   INTEGER  cid=8 notnull=0
+  resting_hr                   INTEGER  cid=9 notnull=0
+  hrv_ms                       REAL  cid=10 notnull=0
+  had_training                 INTEGER  cid=11 notnull=0
+  sRPE_score                   INTEGER  cid=12 notnull=0
+  menstrual_day                INTEGER  cid=13 notnull=0
+  menstrual_phase              TEXT  cid=14 notnull=0
+  auto_recommendation          TEXT  cid=15 notnull=0
+  created_at                   TIMESTAMP  cid=16 notnull=0
+-- КОМАНДЫ (распределение):
+
+-- ТАБЛИЦА: daily_wellness_old
+  id                           INTEGER  cid=0 notnull=0
+  athlete_id                   INTEGER  cid=1 notnull=1
+  survey_date                  DATE  cid=2 notnull=1
+  protocol_type                TEXT  cid=3 notnull=1
+  sleep_score                  INTEGER  cid=4 notnull=0
+  stress_score                 INTEGER  cid=5 notnull=0
+  fatigue_score                INTEGER  cid=6 notnull=0
+  muscle_soreness              INTEGER  cid=7 notnull=0
+  mood_score                   INTEGER  cid=8 notnull=0
+  resting_hr                   INTEGER  cid=9 notnull=0
+  hrv_ms                       REAL  cid=10 notnull=0
+  had_training                 INTEGER  cid=11 notnull=0
+  sRPE_score                   INTEGER  cid=12 notnull=0
+  doctor_note                  TEXT  cid=13 notnull=0
+  auto_recommendation          TEXT  cid=14 notnull=0
+  created_at                   TIMESTAMP  cid=15 notnull=0
+  menstrual_day                INTEGER  cid=16 notnull=0
+  menstrual_phase              TEXT  cid=17 notnull=0
+-- КОМАНДЫ (распределение):
+
+-- ТАБЛИЦА: doctor_recommendations
+  id                           INTEGER  cid=0 notnull=0
+  athlete_id                   INTEGER  cid=1 notnull=1
+  recommendation_date          DATE  cid=2 notnull=1
+  text                         TEXT  cid=3 notnull=1
+  created_at                   TIMESTAMP  cid=4 notnull=0
+-- КОМАНДЫ (распределение):
+
+-- ТАБЛИЦА: questionnaires
+  id                           INTEGER  cid=0 notnull=0
+  athlete_id                   INTEGER  cid=1 notnull=1
+  completed_at                 TIMESTAMP  cid=2 notnull=0
+  age                          INTEGER  cid=3 notnull=0
+  gender                       TEXT  cid=4 notnull=0
+  position                     TEXT  cid=5 notnull=0
+  level                        TEXT  cid=6 notnull=0
+  experience                   TEXT  cid=7 notnull=0
+  height                       INTEGER  cid=8 notnull=0
+  weight                       INTEGER  cid=9 notnull=0
+  trauma_12m                   TEXT  cid=10 notnull=0
+  trauma_12m_detail            TEXT  cid=11 notnull=0
+  zones                        TEXT  cid=12 notnull=0
+  pain_now                     TEXT  cid=13 notnull=0
+  pain_now_detail              TEXT  cid=14 notnull=0
+  chronic                      TEXT  cid=15 notnull=0
+  chronic_detail               TEXT  cid=16 notnull=0
+  surgery                      TEXT  cid=17 notnull=0
+  surgery_detail               TEXT  cid=18 notnull=0
+  meds                         TEXT  cid=19 notnull=0
+  meds_detail                  TEXT  cid=20 notnull=0
+  train_count                  INTEGER  cid=21 notnull=0
+  train_duration               INTEGER  cid=22 notnull=0
+  season                       TEXT  cid=23 notnull=0
+  form_score                   INTEGER  cid=24 notnull=0
+  sleep_score                  INTEGER  cid=25 notnull=0
+  warmup                       TEXT  cid=26 notnull=0
+  recovery                     TEXT  cid=27 notnull=0
+  water                        REAL  cid=28 notnull=0
+  diet                         TEXT  cid=29 notnull=0
+  pre_meal                     TEXT  cid=30 notnull=0
+  supplements                  TEXT  cid=31 notnull=0
+  motivation                   INTEGER  cid=32 notnull=0
+  stress                       TEXT  cid=33 notnull=0
+  match_state                  TEXT  cid=34 notnull=0
+  reinjury_fear                TEXT  cid=35 notnull=0
+  goal                         TEXT  cid=36 notnull=0
+  wish                         TEXT  cid=37 notnull=0
+  phone                        TEXT  cid=38 notnull=0
+  birth_date                   TEXT  cid=39 notnull=0
+  surgery_date                 TEXT  cid=40 notnull=0
+  allergies                    TEXT  cid=41 notnull=0
+  allergies_detail             TEXT  cid=42 notnull=0
+-- КОМАНДЫ (распределение):
+   all: 12
+
+-- ТАБЛИЦА: settings
+  key                          TEXT  cid=0 notnull=0
+  value                        TEXT  cid=1 notnull=1
+  updated_at                   TIMESTAMP  cid=2 notnull=0
+-- КОМАНДЫ (распределение):
+
+-- ТАБЛИЦА: sqlite_sequence
+  name                           cid=0 notnull=0
+  seq                            cid=1 notnull=0
+-- КОМАНДЫ (распределение):
+
+
+=== ПРИМЕРЫ ОБЕЗЛИЧЕННЫХ ДАННЫХ ===
+
+-- athletes (6 примеров)
+   колонки: id, telegram_id, username, full_name, age_group, created_at, last_active, survey_streak, total_surveys, team, gender, cycle_length, cycle_length_default
+   {'id': 26, 'telegram_id': 1119795079, 'username': 'user****x', 'full_name': 'К********* Виталий', 'age_group': 'U21', 'created_at': '2026-07-26 11:25:54', 'last_active': '2026-08-04', 'survey_streak': 10, 'total_surveys': 10, 'team': 'ЧБК-2', 'gender': 'male', 'cycle_length': 28, 'cycle_length_default': 28}
+   {'id': 27, 'telegram_id': 186197801, 'username': 'user****x', 'full_name': 'С*********** Семён', 'age_group': 'Pro', 'created_at': '2026-07-27 05:03:05', 'last_active': '2026-07-27', 'survey_streak': 1, 'total_surveys': 1, 'team': 'Студ. сборная ЧО', 'gender': '', 'cycle_length': 28, 'cycle_length_default': 28}
+   {'id': 32, 'telegram_id': 6734782510, 'username': 'user****x', 'full_name': 'Ю******* Анастасия', 'age_group': 'U21', 'created_at': '2026-07-27 06:39:50', 'last_active': '2026-08-01', 'survey_streak': 2, 'total_surveys': 5, 'team': 'Студ. сборная ЧО', 'gender': 'female', 'cycle_length': 28, 'cycle_length_default': 28}
+   {'id': 33, 'telegram_id': 719231671, 'username': 'user****x', 'full_name': 'Ч****** Наум', 'age_group': 'Pro', 'created_at': '2026-07-27 07:59:14', 'last_active': '2026-07-27', 'survey_streak': 1, 'total_surveys': 1, 'team': 'Челбаскет', 'gender': 'male', 'cycle_length': 28, 'cycle_length_default': 28}
+   {'id': 39, 'telegram_id': 1829979209, 'username': 'user****x', 'full_name': 'З**** Никита', 'age_group': 'U17', 'created_at': '2026-07-27 10:04:54', 'last_active': '2026-07-27', 'survey_streak': 1, 'total_surveys': 1, 'team': 'ЧБК-2', 'gender': 'male', 'cycle_length': 28, 'cycle_length_default': 28}
+   {'id': 40, 'telegram_id': 1499763625, 'username': 'user****x', 'full_name': 'С**** Илья', 'age_group': 'U18', 'created_at': '2026-07-27 10:05:08', 'last_active': '2026-08-04', 'survey_streak': 1, 'total_surveys': 8, 'team': 'ЧБК-2', 'gender': 'male', 'cycle_length': 28, 'cycle_length_default': 28}
+
+-- questionnaires (6 примеров)
+   колонки: id, athlete_id, completed_at, age, gender, position, level, experience, height, weight, trauma_12m, trauma_12m_detail, zones, pain_now, pain_now_detail, chronic, chronic_detail, surgery, surgery_detail, meds, meds_detail, train_count, train_duration, season, form_score, sleep_score, warmup, recovery, water, diet, pre_meal, supplements, motivation, stress, match_state, reinjury_fear, goal, wish, phone, birth_date, surgery_date, allergies, allergies_detail
+   {'id': 1, 'athlete_id': 55, 'completed_at': '2026-07-28 05:49:48', 'age': 33, 'gender': 'М', 'position': 'Универсал', 'level': 'Любитель', 'experience': '3–7 лет', 'height': None, 'weight': None, 'trauma_12m': 'Нет', 'trauma_12m_detail': '', 'zones': 'Плечи', 'pain_now': 'Нет', 'pain_now_detail': '', 'chronic': 'Нет', 'chronic_detail': '', 'surgery': 'Нет', 'surgery_detail': '', 'meds': 'Да', 'meds_detail': 'Колено', 'train_count': None, 'train_duration': None, 'season': None, 'form_score': None, 'sleep_score': None, 'warmup': None, 'recovery': None, 'water': None, 'diet': None, 'pre_meal': None, 'supplements': None, 'motivation': None, 'stress': None, 'match_state': None, 'reinjury_fear': None, 'goal': None, 'wish': None, 'phone': None, 'birth_date': None, 'surgery_date': None, 'allergies': None, 'allergies_detail': None}
+   {'id': 2, 'athlete_id': 57, 'completed_at': '2026-07-28 06:06:58', 'age': 33, 'gender': 'М', 'position': 'Универсал', 'level': 'Любитель', 'experience': '3–7 лет', 'height': None, 'weight': None, 'trauma_12m': 'Да', 'trauma_12m_detail': 'Травма плеча, физио и упражнения', 'zones': 'Колени', 'pain_now': 'Нет', 'pain_now_detail': '', 'chronic': 'Да', 'chronic_detail': 'Поясница, раз в год', 'surgery': 'Нет', 'surgery_detail': '', 'meds': 'Да', 'meds_detail': 'Магний', 'train_count': None, 'train_duration': None, 'season': None, 'form_score': None, 'sleep_score': None, 'warmup': None, 'recovery': None, 'water': None, 'diet': None, 'pre_meal': None, 'supplements': None, 'motivation': None, 'stress': None, 'match_state': None, 'reinjury_fear': None, 'goal': None, 'wish': None, 'phone': None, 'birth_date': None, 'surgery_date': None, 'allergies': None, 'allergies_detail': None}
+   {'id': 3, 'athlete_id': 59, 'completed_at': '2026-07-28 07:54:57', 'age': 15, 'gender': 'М', 'position': 'SG', 'level': 'Профессионал', 'experience': '7–15 лет', 'height': None, 'weight': None, 'trauma_12m': 'Да', 'trauma_12m_detail': 'повреждение мениска, дал отдых ноге, делал магниты, мазал мазью и щас закачиваю', 'zones': 'Колени', 'pain_now': 'Нет', 'pain_now_detail': '', 'chronic': 'Нет', 'chronic_detail': '', 'surgery': 'Нет', 'surgery_detail': '', 'meds': 'Нет', 'meds_detail': '', 'train_count': 7, 'train_duration': 90, 'season': 'Межсезонье', 'form_score': 7, 'sleep_score': 8, 'warmup': 'Да, всегда', 'recovery': 'Да, регулярно', 'water': 3.5, 'diet': 'Да, сам', 'pre_meal': 'За 1-2ч', 'supplements': 'Ничего', 'motivation': 8, 'stress': 'Нет', 'match_state': 'Спокойная уверенность', 'reinjury_fear': 'Иногда', 'goal': 'главная цель у меня это заиграть в профессиональным баскетболом за границей в нба или в евро баскете', 'wish': '', 'phone': None, 'birth_date': None, 'surgery_date': None, 'allergies': None, 'allergies_detail': None}
+   {'id': 5, 'athlete_id': 58, 'completed_at': '2026-07-31 17:11:14', 'age': 33, 'gender': 'М', 'position': 'Универсал', 'level': 'Любитель', 'experience': '3–7 лет', 'height': None, 'weight': None, 'trauma_12m': 'Нет', 'trauma_12m_detail': '', 'zones': 'Бёдра', 'pain_now': 'Нет', 'pain_now_detail': '', 'chronic': 'Нет', 'chronic_detail': '', 'surgery': 'Нет', 'surgery_detail': '', 'meds': 'Да', 'meds_detail': 'мсм, коллаген, протеин', 'train_count': 6, 'train_duration': 120, 'season': 'Межсезонье', 'form_score': 5, 'sleep_score': 8, 'warmup': 'Да, всегда', 'recovery': 'Иногда', 'water': 3.5, 'diet': 'Да, сам', 'pre_meal': 'За 3-4ч', 'supplements': 'Другое', 'motivation': 8, 'stress': 'Периодически', 'match_state': 'По-разному', 'reinjury_fear': 'Да, постоянно', 'goal': 'Повышение зарплаты', 'wish': '', 'phone': None, 'birth_date': None, 'surgery_date': None, 'allergies': None, 'allergies_detail': None}
+   {'id': 6, 'athlete_id': 0, 'completed_at': None, 'age': 20, 'gender': None, 'position': None, 'level': None, 'experience': None, 'height': None, 'weight': None, 'trauma_12m': None, 'trauma_12m_detail': None, 'zones': None, 'pain_now': None, 'pain_now_detail': None, 'chronic': None, 'chronic_detail': None, 'surgery': None, 'surgery_detail': None, 'meds': None, 'meds_detail': None, 'train_count': None, 'train_duration': None, 'season': None, 'form_score': None, 'sleep_score': None, 'warmup': None, 'recovery': None, 'water': None, 'diet': None, 'pre_meal': None, 'supplements': None, 'motivation': None, 'stress': None, 'match_state': None, 'reinjury_fear': None, 'goal': None, 'wish': None, 'phone': None, 'birth_date': None, 'surgery_date': None, 'allergies': None, 'allergies_detail': None}
+   {'id': 7, 'athlete_id': 63, 'completed_at': None, 'age': 28, 'gender': 'Ж', 'position': 'Универсал', 'level': 'Ветеран', 'experience': '7–15 лет', 'height': None, 'weight': None, 'trauma_12m': 'Нет', 'trauma_12m_detail': '', 'zones': 'Ничего', 'pain_now': 'Нет', 'pain_now_detail': '', 'chronic': 'Нет', 'chronic_detail': '', 'surgery': 'Нет', 'surgery_detail': '', 'meds': 'Нет', 'meds_detail': '', 'train_count': 0, 'train_duration': 30, 'season': 'Пауза/отпуск', 'form_score': 1, 'sleep_score': 4, 'warmup': 'Нет', 'recovery': 'Нет', 'water': 1.0, 'diet': 'Не задумывался', 'pre_meal': 'Натощак', 'supplements': None, 'motivation': None, 'stress': None, 'match_state': None, 'reinjury_fear': None, 'goal': None, 'wish': None, 'phone': None, 'birth_date': None, 'surgery_date': None, 'allergies': None, 'allergies_detail': None}
+
+-- daily_wellness (6 примеров)
+   колонки: id, athlete_id, survey_date, protocol_type, sleep_score, stress_score, fatigue_score, muscle_soreness, mood_score, resting_hr, hrv_ms, had_training, sRPE_score, menstrual_day, menstrual_phase, auto_recommendation, created_at, cycle_day, cycle_length, cycle_phase, complaints
+   {'id': 3, 'athlete_id': 26, 'survey_date': '2026-07-26', 'protocol_type': 'full', 'sleep_score': 6, 'stress_score': 7, 'fatigue_score': 6, 'muscle_soreness': 4, 'mood_score': 7, 'resting_hr': 55, 'hrv_ms': None, 'had_training': 1, 'sRPE_score': 5, 'menstrual_day': None, 'menstrual_phase': None, 'auto_recommendation': '😴 *Отличный сон!* Восстановление на высоте ✅\n\n🧘 *Стресс в норме* ✅', 'created_at': '2026-07-26 11:26:38', 'cycle_day': None, 'cycle_length': None, 'cycle_phase': None, 'complaints': None}
+   {'id': 5, 'athlete_id': 27, 'survey_date': '2026-07-27', 'protocol_type': 'full', 'sleep_score': 4, 'stress_score': 5, 'fatigue_score': 4, 'muscle_soreness': 3, 'mood_score': 5, 'resting_hr': 92, 'hrv_ms': None, 'had_training': 0, 'sRPE_score': None, 'menstrual_day': None, 'menstrual_phase': None, 'auto_recommendation': None, 'created_at': '2026-07-27 05:05:03', 'cycle_day': None, 'cycle_length': None, 'cycle_phase': None, 'complaints': None}
+   {'id': 6, 'athlete_id': 26, 'survey_date': '2026-07-27', 'protocol_type': 'full', 'sleep_score': 4, 'stress_score': 7, 'fatigue_score': 5, 'muscle_soreness': 3, 'mood_score': 6, 'resting_hr': 55, 'hrv_ms': None, 'had_training': 0, 'sRPE_score': None, 'menstrual_day': None, 'menstrual_phase': None, 'auto_recommendation': None, 'created_at': '2026-07-27 05:08:37', 'cycle_day': None, 'cycle_length': None, 'cycle_phase': None, 'complaints': None}
+   {'id': 11, 'athlete_id': 33, 'survey_date': '2026-07-27', 'protocol_type': 'full', 'sleep_score': 4, 'stress_score': 2, 'fatigue_score': 3, 'muscle_soreness': 1, 'mood_score': 3, 'resting_hr': 50, 'hrv_ms': None, 'had_training': 0, 'sRPE_score': None, 'menstrual_day': None, 'menstrual_phase': None, 'auto_recommendation': None, 'created_at': '2026-07-27 08:04:36', 'cycle_day': None, 'cycle_length': None, 'cycle_phase': None, 'complaints': None}
+   {'id': 12, 'athlete_id': 32, 'survey_date': '2026-07-27', 'protocol_type': 'full', 'sleep_score': 5, 'stress_score': 6, 'fatigue_score': 5, 'muscle_soreness': 3, 'mood_score': 4, 'resting_hr': 60, 'hrv_ms': None, 'had_training': 0, 'sRPE_score': None, 'menstrual_day': None, 'menstrual_phase': None, 'auto_recommendation': None, 'created_at': '2026-07-27 09:33:55', 'cycle_day': 23, 'cycle_length': 28, 'cycle_phase': 'Лютеиновая', 'complaints': None}
+   {'id': 16, 'athlete_id': 39, 'survey_date': '2026-07-27', 'protocol_type': 'full', 'sleep_score': 4, 'stress_score': 1, 'fatigue_score': 1, 'muscle_soreness': 1, 'mood_score': 1, 'resting_hr': 61, 'hrv_ms': None, 'had_training': 0, 'sRPE_score': None, 'menstrual_day': None, 'menstrual_phase': None, 'auto_recommendation': None, 'created_at': '2026-07-27 10:05:53', 'cycle_day': None, 'cycle_length': None, 'cycle_phase': None, 'complaints': None}
+
+-- bot_settings (2 примеров)
+   колонки: key, value
+   {'key': 'reminder_hour', 'value': '10'}
+   {'key': 'reminder_tz', 'value': 'Asia/Yekaterinburg'}

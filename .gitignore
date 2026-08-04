@@ -1,0 +1,10 @@
+# Секреты и чувствительные данные — НЕ пушить
+.env
+data/
+*.db
+*.log
+bot.log
+healthcheck.log
+__pycache__/
+*.pyc
+bot.pid
