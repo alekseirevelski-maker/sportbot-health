@@ -826,6 +826,13 @@ class SportHealthBot:
     async def show_team(self, update, ctx):
         q = update.callback_query
         await q.answer()
+        # Состав доступен только врачу/тренеру (защита ПДн — спортсмены не видят чужие данные)
+        if q.from_user.id not in ADMIN_TELEGRAM_IDS:
+            await q.edit_message_text(
+                "🔒 Список команды доступен только врачу/тренеру.",
+                reply_markup=self.kb([[(f"🏠 Главная", "main_menu")]])
+            )
+            return
         athletes = self.db.get_all_athletes()
         if not athletes:
             await q.edit_message_text("📭 Нет спортсменов.", reply_markup=self.kb([[(f"🏠 Главная", "main_menu")]]))
@@ -1749,45 +1756,62 @@ class SportHealthBot:
             try:
                 bl = self.db.get_individual_baseline(athlete_id, 30)
                 if bl:
-                    ind = self._individual_recs(data, bl)
+                    # для правила «2 отклонения подряд» берём предыдущий опрос (вчера)
+                    hist = self.db.get_last_wellness(athlete_id, 2)
+                    prev = hist[1] if len(hist) >= 2 else None
+                    ind = self._individual_recs(data, bl, prev=prev)
                     if ind:
                         pad = "\n\n".join(ind)
-                        recs.append("📊 *Отклонение от личной нормы (30 дн.):*\n" + pad)
+                        recs.append("📊 *Отклонение от личной нормы (30 дн., 2 дня подряд):*\n" + pad)
             except Exception as e:
                 logger.warning(f"individual baseline recs: {e}")
 
         return "\n\n".join(recs) if recs else "✅ Все показатели в норме!"
 
-    def _individual_recs(self, data, bl):
-        """Алерты по личной норме (30 дн.). Пустой список, если всё в пределах личного коридора."""
-        out = []
-        # Пульс: выше личной нормы на +10% (строгий порог)
-        hr = data.get("resting_hr")
-        if hr and bl.get("avg_hr"):
-            if hr > bl["avg_hr"] * 1.10:
-                out.append(f"❤️ *Пульс выше личной нормы ({hr} vs ~{int(bl['avg_hr'])}/30д)*\n• Обратить внимание на восстановление")
+    def _individual_recs(self, data, bl, prev=None):
+        """Алерты по личной норме (30 дн.), только при 2 ОТКЛОНЕНИЯХ ПОДРЯД (сегодня + вчера)."""
         avg = bl.get("avg") or {}
-        # Ухудшение шкалы 1-7 от личного среднего: сон/настроение вниз, стресс/утомл/боль вверх
-        # сон
-        v = data.get("sleep_score"); a = avg.get("sleep")
-        if v is not None and a is not None and v < a - 1.5:
-            out.append(f"😴 *Сон ниже личной нормы ({v} vs ~{a:.1f}/30д)*")
-        # настроение
-        v = data.get("mood_score"); a = avg.get("mood")
-        if v is not None and a is not None and v < a - 1.5:
-            out.append(f"😊 *Настроение ниже личной нормы ({v} vs ~{a:.1f}/30д)*")
-        # стресс
-        v = data.get("stress_score"); a = avg.get("stress")
-        if v is not None and a is not None and v > a + 1.5:
-            out.append(f"🧘 *Стресс выше личной нормы ({v} vs ~{a:.1f}/30д)*")
-        # утомление
-        v = data.get("fatigue_score"); a = avg.get("fatigue")
-        if v is not None and a is not None and v > a + 1.5:
-            out.append(f"⚡ *Утомление выше личной нормы ({v} vs ~{a:.1f}/30д)*")
-        # боль
-        v = data.get("muscle_soreness"); a = avg.get("soreness")
-        if v is not None and a is not None and v > a + 1.5:
-            out.append(f"🤕 *Боль выше личной нормы ({v} vs ~{a:.1f}/30д)*")
+
+        def dev(value, kind):
+            """True, если `value` выходит за личный порог по показателю `kind`."""
+            if value is None:
+                return False
+            if kind == "hr":
+                return bl.get("avg_hr") is not None and value > bl["avg_hr"] * 1.10
+            if kind == "sleep":
+                a = avg.get("sleep"); return a is not None and value < a - 1.5
+            if kind == "mood":
+                a = avg.get("mood"); return a is not None and value < a - 1.5
+            if kind == "stress":
+                a = avg.get("stress"); return a is not None and value > a + 1.5
+            if kind == "fatigue":
+                a = avg.get("fatigue"); return a is not None and value > a + 1.5
+            if kind == "soreness":
+                a = avg.get("soreness"); return a is not None and value > a + 1.5
+            return False
+
+        out = []
+        # если нет данных за «вчера» — не сигналим по индивидуальному (только общие коридоры)
+        if prev is None:
+            return out
+
+        # пульс
+        cur_hr = data.get("resting_hr")
+        prev_hr = prev.get("resting_hr")
+        if dev(cur_hr, "hr") and dev(prev_hr, "hr"):
+            out.append(f"❤️ *Пульс выше личной нормы 2 дня подряд ({cur_hr} vs ~{int(bl['avg_hr'])}/30д)*\n• Обратить внимание на восстановление")
+
+        checks = [
+            ("sleep_score", "sleep", "😴 *Сон ниже личной нормы 2 дня подряд*"),
+            ("mood_score", "mood", "😊 *Настроение ниже личной нормы 2 дня подряд*"),
+            ("stress_score", "stress", "🧘 *Стресс выше личной нормы 2 дня подряд*"),
+            ("fatigue_score", "fatigue", "⚡ *Утомление выше личной нормы 2 дня подряд*"),
+            ("muscle_soreness", "soreness", "🤕 *Боль выше личной нормы 2 дня подряд*"),
+        ]
+        for key, kind, label in checks:
+            cur = data.get(key); prv = prev.get(key)
+            if dev(cur, kind) and dev(prv, kind):
+                out.append(f"{label} ({cur} vs ~{avg.get(kind):.1f}/30д)*")
         return out
     
 
