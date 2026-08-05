@@ -1270,7 +1270,12 @@ class SportHealthBot:
                 await self._db_run(self.db.save_questionnaire, athlete["id"], state["q_data"])
                 self.db.complete_questionnaire(athlete["id"])
             self.clear_state(user_id)
-            await update.message.reply_text("✅ *Анкета полностью заполнена!* Спасибо!", parse_mode="Markdown", reply_markup=self.kb([[(f"🏠 Главное меню", "main_menu")]]))
+            await update.message.reply_text(
+                "✅ *Анкета полностью заполнена!* Спасибо!\n\n📝 Теперь пройди ежедневный опрос — это займёт 2 минуты:",
+                parse_mode="Markdown",
+                reply_markup=self.kb([[(f"📝 Пройти опрос", "do_survey")],
+                                      [(f"🏠 Главное меню", "main_menu")]])
+            )
             return
 
         # Консультация — ввод жалоб текстом
@@ -2845,9 +2850,11 @@ class SportHealthBot:
 
         text = (
             f"📅 *День цикла* (цикл ~{cl} дн.){hint}\n\n"
-            f"Какой сегодня день?\n\n"
-            f"*Пример:* если месячные начались 5 дней назад — сегодня день 5.\n\n"
-            f"Можно выбрать диапазон или ввести число:"
+            f"Какой сегодня день цикла?\n\n"
+            f"*Как посчитать:* день 1 — это первый день месячных. "
+            f"Сегодняшний день = сколько дней прошло с их начала.\n"
+            f"*Пример:* месячные начались в понедельник, сегодня среда — значит день 3.\n\n"
+            f"Если ещё не ведёшь дневник — просто выбери примерный день или нажми «Нет данных»."
         )
 
         if q:
@@ -2865,7 +2872,8 @@ class SportHealthBot:
         state["step"] = "survey_cycle"
         await q.edit_message_text(
             f"📅 *День цикла* (цикл ~{cl} дн.)\n\n"
-            f"Введи число — какой сегодня день цикла (1-{cl}):"
+            f"Введи число — какой сегодня день цикла (1-{cl}).\n"
+            f"*Подсказка:* день 1 = первый день месячных."
         )
 
     async def set_cycle_day(self, update, ctx):
@@ -2949,9 +2957,12 @@ class SportHealthBot:
         ]
         text = (
             "📅 *Длина менструального цикла*\n\n"
-            "Сколько дней обычно длится твой цикл\n"
-            "(от первого дня месячных до следующих)?\n\n"
-            "Норма: 21-35 дней. Если не знаешь — выбери 28."
+            "Менструальный цикл — это дни от первого дня месячных до начала следующих.\n"
+            "Обычно он длится 21–35 дней (в среднем 28).\n\n"
+            "Помогает отслеживать фазы и лучше понимать самочувствие. "
+            "Если ты ещё не ведёшь дневник и не знаешь свою длину — не переживай, выбери 28 (среднее значение), "
+            "позже это можно будет скорректировать.\n\n"
+            "*Сколько дней обычно длится твой цикл?*"
         )
         if q:
             await q.edit_message_text(text, reply_markup=self.kb(buttons), parse_mode="Markdown")
@@ -3263,15 +3274,15 @@ class SportHealthBot:
             "q_train_count": ("📋 *Блок 3: Режим*\n\nСколько тренировок в неделю?", [[(str(i),f"q_tcount_{i}") for i in range(0,11)]]),
             "q_train_duration": ("📋 *Блок 3*\n\nДлительность тренировки?", [[(str(i),f"q_tdur_{i}") for i in [30,45,60,90,120,180]]]),
             "q_season": ("📋 *Блок 3*\n\nСезон или межсезонье?", [[("Игровой сезон","q_season_Игровой сезон")],[("Предсезонка","q_season_Предсезонка")],[("Межсезонье","q_season_Межсезонье")],[("Пауза/отпуск","q_season_Пауза/отпуск")]]),
-            "q_form": ("📋 *Блок 3*\n\nФизическая форма (1-10)?", [[(str(i),f"q_form_{i}") for i in range(1,11)]]),
-            "q_sleep_score": ("📋 *Блок 3*\n\nКачество сна (1-10)?", [[(str(i),f"q_sleep_{i}") for i in range(1,11)]]),
+            "q_form": ("📋 *Блок 3*\n\nФизическая форма (1-10)?", [[(str(i),f"q_form_{i}") for i in range(1,6)],[(str(i),f"q_form_{i}") for i in range(6,11)]]),
+            "q_sleep_score": ("📋 *Блок 3*\n\nКачество сна (1-10)?", [[(str(i),f"q_sleep_{i}") for i in range(1,6)],[(str(i),f"q_sleep_{i}") for i in range(6,11)]]),
             "q_warmup": ("📋 *Блок 3*\n\nРазминка/заминка?", [[("Да, всегда","q_warm_Да, всегда"),("Только разминку","q_warm_Только разминку")],[("Только заминку","q_warm_Только заминку"),("Нет","q_warm_Нет")],[("Не регулярно","q_warm_Не регулярно")]]),
             "q_recovery": ("📋 *Блок 3*\n\nВосстановительные дни?", [[("Да, регулярно","q_rec_Да, регулярно"),("Иногда","q_rec_Иногда")],[("Нет","q_rec_Нет"),("Не знаю","q_rec_Не знаю")]]),
             "q_water": ("📋 *Блок 4: Питание*\n\nСколько воды (л) в день?", [[("1л","q_water_1"),("1.5л","q_water_1.5")],[("2л","q_water_2"),("2.5л","q_water_2.5")],[("3л","q_water_3"),("3.5л+","q_water_3.5")]]),
             "q_diet": ("📋 *Блок 4*\n\nПлан питания?", [[("Да, с диетологом","q_diet_Да, с диетологом"),("Да, сам","q_diet_Да, сам")],[("Частично","q_diet_Частично"),("Нет","q_diet_Нет")],[("Не задумывался","q_diet_Не задумывался")]]),
             "q_pre_meal": ("📋 *Блок 4*\n\nЗа сколько ешь перед тренировкой?", [[("За 1-2ч","q_meal_За 1-2ч"),("За 3-4ч","q_meal_За 3-4ч")],[("Менее чем за час","q_meal_Менее чем за час"),("Натощак","q_meal_Натощак")]]),
             "q_supplements": ("📋 *Блок 4*\n\nСпортпит?", [[("Протеин","q_supp_Протеин"),("Креатин","q_supp_Креатин")],[("Хондропротекторы","q_supp_Хондропротекторы"),("Изотоники","q_supp_Изотоники")],[("Кофеин","q_supp_Кофеин"),("Ничего","q_supp_Ничего")],[("Другое","q_supp_Другое")]]),
-            "q_motivation": ("📋 *Блок 5: Психология*\n\nМотивация (1-10)?", [[(str(i),f"q_motiv_{i}") for i in range(1,11)]]),
+            "q_motivation": ("📋 *Блок 5: Психология*\n\nМотивация (1-10)?", [[(str(i),f"q_motiv_{i}") for i in range(1,6)],[(str(i),f"q_motiv_{i}") for i in range(6,11)]]),
             "q_stress": ("📋 *Блок 5*\n\nВнешние факторы мешают?", [[("Да, сильно","q_stress_Да, сильно"),("Периодически","q_stress_Периодически")],[("Нет","q_stress_Нет"),("Не влияют","q_stress_Не влияют")]]),
             "q_match_state": ("📋 *Блок 5*\n\nСостояние перед матчами?", [[("Спокойная уверенность","q_match_Спокойная уверенность")],[("Лёгкое волнение","q_match_Лёгкое волнение")],[("Сильная тревога","q_match_Сильная тревога")],[("По-разному","q_match_По-разному")]]),
             "q_reinjury": ("📋 *Блок 5*\n\nБоишься повторной травмы?", [[("Да, постоянно","q_reinj_Да, постоянно"),("Иногда","q_reinj_Иногда")],[("Нет","q_reinj_Нет"),("Не было травм","q_reinj_Не было травм")]]),
@@ -3453,7 +3464,7 @@ class SportHealthBot:
             except Exception as e:
                 logger.error(f"Q autosave: {e}")
             state["step"] = "q_form"
-            await q.edit_message_text("📋 *Блок 3: Режим*\n\nОцени физическую форму (1-10):", reply_markup=self.kb([[(str(i), f"q_form_{i}") for i in range(1,11)]]), parse_mode="Markdown")
+            await q.edit_message_text("📋 *Блок 3: Режим*\n\nОцени физическую форму (1-10):", reply_markup=self.kb([[(str(i), f"q_form_{i}") for i in range(1,6)],[(str(i), f"q_form_{i}") for i in range(6,11)]]), parse_mode="Markdown")
             return
 
         if step == "q_form":
@@ -3464,7 +3475,7 @@ class SportHealthBot:
             except Exception as e:
                 logger.error(f"Q autosave: {e}")
             state["step"] = "q_sleep_score"
-            await q.edit_message_text("📋 *Блок 3: Режим*\n\nОцени качество сна (1-10):", reply_markup=self.kb([[(str(i), f"q_sleep_{i}") for i in range(1,11)]]), parse_mode="Markdown")
+            await q.edit_message_text("📋 *Блок 3: Режим*\n\nОцени качество сна (1-10):", reply_markup=self.kb([[(str(i), f"q_sleep_{i}") for i in range(1,6)],[(str(i), f"q_sleep_{i}") for i in range(6,11)]]), parse_mode="Markdown")
             return
 
         if step == "q_sleep_score":
@@ -3547,7 +3558,7 @@ class SportHealthBot:
                 except Exception as e:
                     logger.error(f"Q autosave: {e}")
                 state["step"] = "q_motivation"
-                await q.edit_message_text("📋 *Блок 5: Психология*\n\nМотивация (1-10):", reply_markup=self.kb([[(str(i), f"q_motiv_{i}") for i in range(1,11)]]), parse_mode="Markdown")
+                await q.edit_message_text("📋 *Блок 5: Психология*\n\nМотивация (1-10):", reply_markup=self.kb([[(str(i), f"q_motiv_{i}") for i in range(1,6)],[(str(i), f"q_motiv_{i}") for i in range(6,11)]]), parse_mode="Markdown")
                 return
 
             # Кнопка "Другое" -> ввести свой вариант
@@ -3591,7 +3602,7 @@ class SportHealthBot:
             except Exception as e:
                 logger.error(f"Q autosave: {e}")
             state["step"] = "q_motivation"
-            await q.edit_message_text("📋 *Блок 5: Психология*\n\nМотивация (1-10):", reply_markup=self.kb([[(str(i), f"q_motiv_{i}") for i in range(1,11)]]), parse_mode="Markdown")
+            await q.edit_message_text("📋 *Блок 5: Психология*\n\nМотивация (1-10):", reply_markup=self.kb([[(str(i), f"q_motiv_{i}") for i in range(1,6)],[(str(i), f"q_motiv_{i}") for i in range(6,11)]]), parse_mode="Markdown")
             return
 
         if step == "q_supp_other_input":
@@ -3696,7 +3707,12 @@ class SportHealthBot:
             await self._db_run(self.db.save_questionnaire, athlete["id"], data)
             self.db.complete_questionnaire(athlete["id"])
         self.clear_state(q.from_user.id)
-        await q.edit_message_text("✅ *Анкета полностью заполнена!*\n\nДанные сохранены и доступны врачу.", parse_mode="Markdown", reply_markup=self.kb([[(f"🏠 Главное меню", "main_menu")]]))
+        await q.edit_message_text(
+            "✅ *Анкета полностью заполнена!*\n\n📝 Теперь пройди ежедневный опрос — это займёт 2 минуты:",
+            parse_mode="Markdown",
+            reply_markup=self.kb([[(f"📝 Пройти опрос", "do_survey")],
+                                  [(f"🏠 Главное меню", "main_menu")]])
+        )
 
     async def show_questionnaire_list(self, update, ctx, page=0):
         q = update.callback_query
