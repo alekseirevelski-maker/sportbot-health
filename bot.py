@@ -1607,7 +1607,7 @@ class SportHealthBot:
             "protocol": "simple" if athlete["age_group"] in SIMPLE_PROTOCOLS else "full",
         })
 
-        recs = self._doctor_recs(data, athlete["age_group"])
+        recs = self._doctor_recs(data, athlete["age_group"], athlete_id=athlete["id"])
         # Hooper Index из 5 показателей: сон+стресс+утомление+боль+настроение
         hooper = sum(filter(None, [data.get("sleep_score"), data.get("stress_score"),
                                     data.get("fatigue_score"), data.get("muscle_soreness"),
@@ -1699,7 +1699,7 @@ class SportHealthBot:
         except Exception as e:
             logger.error(f"Send to admin {admin_id}: {e}")
 
-    def _doctor_recs(self, data, age_group):
+    def _doctor_recs(self, data, age_group, athlete_id=None):
         recs = []
         sleep = data.get("sleep_score")
         if sleep is not None:
@@ -1743,7 +1743,52 @@ class SportHealthBot:
                 recs.append("🔄 *Фаза: Лютеиновая (17-28 день)*\n• Нагрузка: сниженная\n• Добавки: Магний, Витамин B6, Омега-3\n• Восстановление: сон +1ч, массаж\n• Питание: магний, калий, уменьшить соль")
             else:
                 recs.append(f"🔄 *Фаза цикла:* {cycle_phase}\n• Учитывай фазу при планировании нагрузок")
+
+        # Индивидуальные коридоры (личная норма 30 дн.) — если у спортсмена есть достаточная история
+        if athlete_id:
+            try:
+                bl = self.db.get_individual_baseline(athlete_id, 30)
+                if bl:
+                    ind = self._individual_recs(data, bl)
+                    if ind:
+                        pad = "\n\n".join(ind)
+                        recs.append("📊 *Отклонение от личной нормы (30 дн.):*\n" + pad)
+            except Exception as e:
+                logger.warning(f"individual baseline recs: {e}")
+
         return "\n\n".join(recs) if recs else "✅ Все показатели в норме!"
+
+    def _individual_recs(self, data, bl):
+        """Алерты по личной норме (30 дн.). Пустой список, если всё в пределах личного коридора."""
+        out = []
+        # Пульс: выше личной нормы на +10% (строгий порог)
+        hr = data.get("resting_hr")
+        if hr and bl.get("avg_hr"):
+            if hr > bl["avg_hr"] * 1.10:
+                out.append(f"❤️ *Пульс выше личной нормы ({hr} vs ~{int(bl['avg_hr'])}/30д)*\n• Обратить внимание на восстановление")
+        avg = bl.get("avg") or {}
+        # Ухудшение шкалы 1-7 от личного среднего: сон/настроение вниз, стресс/утомл/боль вверх
+        # сон
+        v = data.get("sleep_score"); a = avg.get("sleep")
+        if v is not None and a is not None and v < a - 1.5:
+            out.append(f"😴 *Сон ниже личной нормы ({v} vs ~{a:.1f}/30д)*")
+        # настроение
+        v = data.get("mood_score"); a = avg.get("mood")
+        if v is not None and a is not None and v < a - 1.5:
+            out.append(f"😊 *Настроение ниже личной нормы ({v} vs ~{a:.1f}/30д)*")
+        # стресс
+        v = data.get("stress_score"); a = avg.get("stress")
+        if v is not None and a is not None and v > a + 1.5:
+            out.append(f"🧘 *Стресс выше личной нормы ({v} vs ~{a:.1f}/30д)*")
+        # утомление
+        v = data.get("fatigue_score"); a = avg.get("fatigue")
+        if v is not None and a is not None and v > a + 1.5:
+            out.append(f"⚡ *Утомление выше личной нормы ({v} vs ~{a:.1f}/30д)*")
+        # боль
+        v = data.get("muscle_soreness"); a = avg.get("soreness")
+        if v is not None and a is not None and v > a + 1.5:
+            out.append(f"🤕 *Боль выше личной нормы ({v} vs ~{a:.1f}/30д)*")
+        return out
     
 
 

@@ -649,3 +649,29 @@ class Database:
         except Exception as e:
             logger.error(f"delete_user_state: {e}")
             return False
+
+    # ============ ИНДИВИДУАЛЬНАЯ БАЗОВАЯ ЛИНИЯ (личная норма) ============
+    def get_individual_baseline(self, athlete_id, days=30):
+        """Личная норма спортсмена по последним `days` опросам.
+        Возвращает {'n', 'avg_hr', 'avg': {sleep,stress,fatigue,soreness,mood}} или None (данных < 5)."""
+        rows = self.get_last_wellness(athlete_id, days)
+        if len(rows) < 5:
+            return None
+        sums = {"sleep": [], "stress": [], "fatigue": [], "soreness": [], "mood": []}
+        hr = []
+        for r in rows:
+            if r.get("sleep_score") is not None:
+                sums["sleep"].append(r["sleep_score"])
+            if r.get("stress_score") is not None:
+                sums["stress"].append(r["stress_score"])
+            if r.get("fatigue_score") is not None:
+                sums["fatigue"].append(r["fatigue_score"])
+            if r.get("muscle_soreness") is not None:
+                sums["soreness"].append(r["muscle_soreness"])
+            if r.get("mood_score") is not None:
+                sums["mood"].append(r["mood_score"])
+            if r.get("resting_hr") is not None:
+                hr.append(r["resting_hr"])
+        avg = {k: (sum(v) / len(v)) if v else None for k, v in sums.items()}
+        avg_hr = (sum(hr) / len(hr)) if hr else None
+        return {"n": len(rows), "avg_hr": avg_hr, "avg": avg}
