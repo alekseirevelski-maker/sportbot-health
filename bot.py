@@ -187,7 +187,7 @@ class SportHealthBot:
         except Exception as e:
             logger.warning(f"persist_user_state: {e}")
 
-    def _cleanup_stale_sessions(self):
+    def _cleanup_stale_sessions(self, context=None):
         """Периодическая очистка неактивных сессий (TTL = _state_ttl)."""
         now = time.time()
         stale = [uid for uid, st in list(self.user_states.items())
