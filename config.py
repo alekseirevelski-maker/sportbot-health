@@ -8,6 +8,24 @@ load_dotenv(Path(__file__).parent / ".env")
 
 BOT_TOKEN = os.environ.get("SPORT_BOT_TOKEN", "")
 
+# ============ АДМИНЫ И НАПОМИНАНИЯ (через .env) ============
+_ADMIN_FALLBACK = {351572247}
+
+
+def _parse_admin_ids(raw: str) -> set:
+    ids = set()
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.add(int(part))
+    return ids
+
+
+ADMIN_IDS = _parse_admin_ids(os.environ.get("ADMIN_IDS", "")) or _ADMIN_FALLBACK
+
+REMINDER_HOUR_DEFAULT = int(os.environ.get("REMINDER_HOUR", "20"))
+REMINDER_MINUTE_DEFAULT = int(os.environ.get("REMINDER_MINUTE", "0"))
+
 # ============ НАСТРОЙКИ UI ============
 COLORS = {
     "primary": "#1E90FF",

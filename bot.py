@@ -21,12 +21,15 @@ from config import (
     MOTIVATIONAL_MESSAGES, PROXY_URL,
     RATE_LIMIT_MESSAGES, RATE_LIMIT_WINDOW,
     MENSTRUAL_ENABLED_GROUPS,
+    ADMIN_IDS, REMINDER_HOUR_DEFAULT, REMINDER_MINUTE_DEFAULT,
 )
 from cycle_medicine import (
     get_cycle_phase_info, get_cycle_phase, PHASES,
     AGE_SPECIFIC, CYCLE_LENGTH_MEDIAN,
 )
 from watch_parser import parse_watch
+
+from validator import sanitize_text, validate_heart_rate, validate_age_ge14
 
 if PROXY_URL:
     os.environ["http_proxy"] = PROXY_URL
@@ -37,11 +40,11 @@ from database import Database, TEAMS
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-ADMIN_TELEGRAM_IDS = {351572247}
+ADMIN_TELEGRAM_IDS = ADMIN_IDS
 
-# Настройки напоминаний (по умолчанию 20:00)
-REMINDER_HOUR = 20
-REMINDER_MINUTE = 0
+# Настройки напоминаний (по умолчанию из .env; переопределяются из БД при старте)
+REMINDER_HOUR = REMINDER_HOUR_DEFAULT
+REMINDER_MINUTE = REMINDER_MINUTE_DEFAULT
 REMINDER_TZ = "Asia/Yekaterinburg"
 
 
@@ -129,14 +132,34 @@ class SportHealthBot:
         self.user_states: Dict[int, Dict[str, Any]] = {}
         self.rate_limiter = defaultdict(list)
         self.job_queue = None
+        self._state_ttl = 3 * 24 * 3600  # TTL состояний/сессий (3 дня) — защита от утечки памяти
 
     def get_state(self, uid):
         if uid not in self.user_states:
-            self.user_states[uid] = {"step": None, "data": {}}
+            self.user_states[uid] = {"step": None, "data": {}, "_seen": time.time()}
+        else:
+            self.user_states[uid]["_seen"] = time.time()
         return self.user_states[uid]
 
     def clear_state(self, uid):
         self.user_states.pop(uid, None)
+
+    def _cleanup_stale_sessions(self):
+        """Периодическая очистка неактивных сессий (TTL = _state_ttl)."""
+        now = time.time()
+        stale = [uid for uid, st in list(self.user_states.items())
+                 if now - st.get("_seen", now) > self._state_ttl]
+        for uid in stale:
+            self.user_states.pop(uid, None)
+        # rate_limiter: отсекаем записи, чей последний запрос старше 2x window (по сути TTL)
+        for uid in list(self.rate_limiter.keys()):
+            lst = [t for t in self.rate_limiter[uid] if now - t < RATE_LIMIT_WINDOW]
+            if not lst:
+                self.rate_limiter.pop(uid, None)
+            else:
+                self.rate_limiter[uid] = lst
+        if stale or len(self.rate_limiter) > 5000:
+            logger.info(f"TTL cleanup: удалено сессий={len(stale)}")
 
     def check_rate_limit(self, uid):
         now = time.time()
@@ -488,6 +511,13 @@ class SportHealthBot:
         supported = [".csv", ".json", ".txt"]
         if not any(fname.endswith(ext) for ext in supported):
             await update.message.reply_text("❌ Формат не поддерживается. Отправь CSV, JSON или TXT.")
+            return
+
+        # Лимит размера загружаемого файла (защита от DoS большими файлами)
+        MAX_FILE_BYTES = 5 * 1024 * 1024  # 5 МБ
+        if getattr(doc, "file_size", None) and doc.file_size > MAX_FILE_BYTES:
+            mb = round(doc.file_size / (1024 * 1024), 1)
+            await update.message.reply_text(f"❌ Файл слишком большой ({mb} МБ). Максимум 5 МБ.")
             return
 
         await update.message.reply_text("📥 Обрабатываю файл...")
@@ -1041,7 +1071,7 @@ class SportHealthBot:
 
         # Жалобы (ввод текста)
         if step == "complaint_text_input":
-            state["data"]["complaints"] = text
+            state["data"]["complaints"] = sanitize_text(text, keep_nl=True)
             await self._finish_survey(update, user_id, state)
             return
 
@@ -1094,7 +1124,7 @@ class SportHealthBot:
             return
 
         if step == "q_trauma_detail":
-            state["q_data"]["trauma_12m_detail"] = text
+            state["q_data"]["trauma_12m_detail"] = sanitize_text(text, keep_nl=True)
             state["step"] = "q_zones"
             await update.message.reply_text("📋 *Блок 2: Травмы*\n\nЗоны, которые беспокоили за 3 месяца:", reply_markup=self.kb([
                 [("Голеностопы", "q_zones_Голеностопы"), ("Колени", "q_zones_Колени")],
@@ -1105,19 +1135,19 @@ class SportHealthBot:
             return
 
         if step == "q_pain_detail":
-            state["q_data"]["pain_now_detail"] = text
+            state["q_data"]["pain_now_detail"] = sanitize_text(text, keep_nl=True)
             state["step"] = "q_chronic"
             await update.message.reply_text("📋 *Блок 2: Травмы*\n\nЕсть рецидивирующая (повторяющаяся) травма?", reply_markup=self.kb([[("Да", "q_chronic_Да"), ("Нет", "q_chronic_Нет")]]), parse_mode="Markdown")
             return
 
         if step == "q_chronic_detail":
-            state["q_data"]["chronic_detail"] = text
+            state["q_data"]["chronic_detail"] = sanitize_text(text, keep_nl=True)
             state["step"] = "q_surgery"
             await update.message.reply_text("📋 *Блок 2: Травмы*\n\nБыли операции, из-за спорта?", reply_markup=self.kb([[("Да", "q_surgery_Да"), ("Нет", "q_surgery_Нет")]]), parse_mode="Markdown")
             return
 
         if step == "q_surgery_detail":
-            state["q_data"]["surgery_detail"] = text
+            state["q_data"]["surgery_detail"] = sanitize_text(text, keep_nl=True)
             state["step"] = "q_surgery_date"
             await update.message.reply_text("📋 *Блок 2: Травмы*\n\nКогда была(и) операция(и) (год или дата)?\nНапример: 2023 или 12.05.2023", parse_mode="Markdown")
             return
@@ -1128,13 +1158,13 @@ class SportHealthBot:
             return
 
         if step == "q_meds_detail":
-            state["q_data"]["meds_detail"] = text
+            state["q_data"]["meds_detail"] = sanitize_text(text, keep_nl=True)
             state["step"] = "q_allergies"
             await update.message.reply_text("📋 *Блок 2: Травмы*\n\nЕсть аллергии?", reply_markup=self.kb([[("Да", "q_allergies_Да"), ("Нет", "q_allergies_Нет")]]), parse_mode="Markdown")
             return
 
         if step == "q_allergies_detail":
-            state["q_data"]["allergies_detail"] = text
+            state["q_data"]["allergies_detail"] = sanitize_text(text, keep_nl=True)
             await self._q_save_then_block3(update, ctx)
             return
 
@@ -1157,13 +1187,13 @@ class SportHealthBot:
             return
 
         if step == "q_goal":
-            state["q_data"]["goal"] = text
+            state["q_data"]["goal"] = sanitize_text(text, keep_nl=True)
             state["step"] = "q_wish"
             await update.message.reply_text("📋 *Блок 6: Цели*\n\nЕсть что-то, с чем нужна помощь?\n(можно пропустить — напиши «-»)", parse_mode="Markdown")
             return
 
         if step == "q_wish":
-            state["q_data"]["wish"] = text if text != "-" else ""
+            state["q_data"]["wish"] = (sanitize_text(text, keep_nl=True)) if text != "-" else ""
             # Сохраняем
             athlete = self.db.get_athlete_by_telegram_id(user_id)
             if athlete:
@@ -1176,7 +1206,7 @@ class SportHealthBot:
 
         # Консультация — ввод жалоб текстом
         if step == "consult_text_input":
-            state["data"]["consult_complaints"] = text
+            state["data"]["consult_complaints"] = sanitize_text(text, keep_nl=True)
             await self._show_calendar(update, ctx, "consult")
             return
 
@@ -3734,6 +3764,12 @@ class SportHealthBot:
         if PROXY_URL:
             app = app.proxy(PROXY_URL).get_updates_proxy(PROXY_URL)
         app = app.build()
+
+        # Периодическая очистка неактивных сессий (защита от утечки памяти)
+        try:
+            app.job_queue.run_repeating(self._cleanup_stale_sessions, interval=1800, first=600, name="ttl_cleanup")
+        except Exception as e:
+            logger.warning(f"TTL cleanup not scheduled: {e}")
 
         app.add_handler(CommandHandler("start", self.cmd_start))
         app.add_handler(CommandHandler("help", self.show_help))

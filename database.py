@@ -132,6 +132,13 @@ class Database:
             wish TEXT,
             FOREIGN KEY (athlete_id) REFERENCES athletes(id)
         )""")
+        # Таблица блокировок (используется в is_athlete_banned/ban_tool — обязана существовать)
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS banned_athletes (
+            athlete_id INTEGER PRIMARY KEY,
+            banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            banned_by INTEGER,
+            reason TEXT
+        )""")
         # Индексы для ускорения частых запросов (производительность при росте данных)
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_wellness_athlete_date ON daily_wellness(athlete_id, survey_date)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_q_athlete ON questionnaires(athlete_id)")
@@ -470,7 +477,17 @@ class Database:
 
     def get_questionnaire(self, athlete_id):
         row = self.conn.execute("SELECT * FROM questionnaires WHERE athlete_id = ?", (athlete_id,)).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            from encryptor import decrypt_value
+            for pk in ("phone", "birth_date"):
+                if d.get(pk):
+                    d[pk] = decrypt_value(d[pk])
+        except Exception as e:
+            logger.error(f"decrypt questionnaire fields: {e}")
+        return d
 
     def has_questionnaire(self, athlete_id):
         row = self.conn.execute("SELECT 1 FROM questionnaires WHERE athlete_id = ?", (athlete_id,)).fetchone()
@@ -484,7 +501,17 @@ class Database:
     def get_questionnaire_progress(self, athlete_id):
         """Получить данные незавершённой анкеты."""
         row = self.conn.execute("SELECT * FROM questionnaires WHERE athlete_id = ? AND completed_at IS NULL", (athlete_id,)).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            from encryptor import decrypt_value
+            for pk in ("phone", "birth_date"):
+                if d.get(pk):
+                    d[pk] = decrypt_value(d[pk])
+        except Exception as e:
+            logger.error(f"decrypt progress: {e}")
+        return d
 
     def get_last_wellness(self, athlete_id, limit=7):
         """Последние N опросов спортсмена для тренда."""
@@ -511,6 +538,14 @@ class Database:
         for k, v in clean.items():
             if isinstance(v, list):
                 clean[k] = ", ".join(str(x) for x in v)
+        # Шифруем персональные данные (телефон, дата рождения) — см. encryptor
+        try:
+            from encryptor import encrypt_value
+            for pk in ("phone", "birth_date"):
+                if pk in clean and clean[pk] not in (None, ""):
+                    clean[pk] = encrypt_value(clean[pk])
+        except Exception as e:
+            logger.error(f"encrypt questionnaire fields: {e}")
         if not clean:
             return
         existing = self.conn.execute("SELECT id FROM questionnaires WHERE athlete_id = ?", (athlete_id,)).fetchone()

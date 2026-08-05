@@ -1,4 +1,4 @@
-"""Генерация PDF-отчётов для врачей."""
+"""Генерация TXT-отчётов для врачей (простой текстовый формат, не PDF)."""
 
 import os
 from datetime import datetime, date, timedelta
@@ -12,7 +12,7 @@ class ReportGenerator:
         self.db = Database()
 
     def generate_athlete_report(self, athlete_id: int, days: int = 7) -> str:
-        """Генерация PDF-отчёта для спортсмена."""
+        """Генерация TXT-отчёта для спортсмена."""
         athlete = self.db.get_athlete_by_id(athlete_id)
         if not athlete:
             return None
