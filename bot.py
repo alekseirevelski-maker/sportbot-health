@@ -1270,12 +1270,7 @@ class SportHealthBot:
                 await self._db_run(self.db.save_questionnaire, athlete["id"], state["q_data"])
                 self.db.complete_questionnaire(athlete["id"])
             self.clear_state(user_id)
-            await update.message.reply_text(
-                "✅ *Анкета полностью заполнена!* Спасибо!\n\n📝 Теперь пройди ежедневный опрос — это займёт 2 минуты:",
-                parse_mode="Markdown",
-                reply_markup=self.kb([[(f"📝 Пройти опрос", "do_survey")],
-                                      [(f"🏠 Главное меню", "main_menu")]])
-            )
+            await self._finish_questionnaire_offer(update, ctx)
             return
 
         # Консультация — ввод жалоб текстом
@@ -3707,12 +3702,27 @@ class SportHealthBot:
             await self._db_run(self.db.save_questionnaire, athlete["id"], data)
             self.db.complete_questionnaire(athlete["id"])
         self.clear_state(q.from_user.id)
-        await q.edit_message_text(
-            "✅ *Анкета полностью заполнена!*\n\n📝 Теперь пройди ежедневный опрос — это займёт 2 минуты:",
-            parse_mode="Markdown",
-            reply_markup=self.kb([[(f"📝 Пройти опрос", "do_survey")],
-                                  [(f"🏠 Главное меню", "main_menu")]])
+        await self._finish_questionnaire_offer(update, ctx)
+
+    async def _finish_questionnaire_offer(self, update, ctx):
+        """После анкеты: предложить подписаться на канал «Вне лимита» и перейти к опросу."""
+        q = update.callback_query if hasattr(update, 'callback_query') and update.callback_query else None
+        text = (
+            "✅ *Анкета заполнена!*\n\n"
+            "Благодарю за прохождение анкеты!\n\n"
+            "В нашем Telegram-канале «Вне лимита» — много актуальной информации о восстановлении, "
+            "питании и профилактике травм. Рекомендую подписаться и познакомиться с материалами:\n\n"
+            "📢 Нажми кнопку «Подписаться на канал», вернись в чат — и продолжишь с опросом."
         )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📢 Подписаться на канал", url="https://t.me/vnelimita")],
+            [InlineKeyboardButton("✅ Перейти к опросу", callback_data="do_survey")],
+            [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")],
+        ])
+        if q:
+            await q.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        else:
+            await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
     async def show_questionnaire_list(self, update, ctx, page=0):
         q = update.callback_query
