@@ -143,6 +143,49 @@ class SportHealthBot:
 
     def clear_state(self, uid):
         self.user_states.pop(uid, None)
+        # асинхронно удаляем из БД (fire-and-forget)
+        try:
+            import asyncio as _asio
+            loop = _asio.get_event_loop()
+            if loop.is_running():
+                loop.run_in_executor(None, lambda: self.db.delete_user_state(uid))
+        except Exception:
+            pass
+
+    async def _db_run(self, fn, *a, **k):
+        """Выполнить синхронный БД-вызов в executor, не блокируя event loop."""
+        import asyncio
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: fn(*a, **k))
+
+    async def restore_user_state(self, uid):
+        """При старте (cmd_start) восстановить сессию из БД в RAM, если её ещё нет."""
+        if uid in self.user_states:
+            return self.user_states[uid]
+        try:
+            import json as _json
+            payload = await self._db_run(self.db.load_user_state, uid)
+            if payload:
+                data = _json.loads(payload)
+                data["_seen"] = time.time()
+                self.user_states[uid] = data
+                return self.user_states[uid]
+        except Exception as e:
+            logger.warning(f"restore_user_state: {e}")
+        self.user_states[uid] = {"step": None, "data": {}, "_seen": time.time()}
+        return self.user_states[uid]
+
+    async def persist_user_state(self, uid):
+        """Сохранить RAM-сессию в БД (защита от потери при рестарте)."""
+        st = self.user_states.get(uid)
+        if not st:
+            return
+        # не храним служебные поля
+        payload = {k: v for k, v in st.items() if k != "_seen"}
+        try:
+            await self._db_run(self.db.save_user_state, uid, payload)
+        except Exception as e:
+            logger.warning(f"persist_user_state: {e}")
 
     def _cleanup_stale_sessions(self):
         """Периодическая очистка неактивных сессий (TTL = _state_ttl)."""
@@ -302,12 +345,31 @@ class SportHealthBot:
     async def cmd_start(self, update, ctx):
         user = update.effective_user
         logger.info(f"cmd_start called by {user.id} ({user.username})")
+        # Восстановить сессию из БД (переживает рестарт), если существует
+        try:
+            await self.restore_user_state(user.id)
+        except Exception:
+            pass
         athlete = self.db.get_athlete_by_telegram_id(user.id)
         if athlete:
             if self.db.is_athlete_banned(athlete["id"]):
                 await update.message.reply_text("🔒 Твой аккаунт заблокирован. Обратись к администратору.", reply_markup=self.kb([[(f"🏠 Главное меню", "main_menu")]]))
                 return
             await self.show_main_menu(update, ctx)
+            return
+
+        # Согласие на обработку ПДн (152-ФЗ) — обязательно до регистрации
+        if not self.db.has_consent(user.id):
+            await update.message.reply_text(
+                "📄 *Согласие на обработку персональных данных*\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "Бот собирает данные о твоём здоровье (опросы самочувствия, анкета, данные часов) "
+                "для медицинского сопровождения команды. Данные хранятся на сервере и доступны только тренеру и врачу.\n\n"
+                "Нажимая кнопку ниже, ты подтверждаешь согласие на их обработку.",
+                reply_markup=self.kb([[(f"✅ Согласен", "consent_accept")],
+                                      [(f"❌ Не согласен", "consent_decline")]]),
+                parse_mode="Markdown"
+            )
             return
 
         text = (
@@ -1179,7 +1241,7 @@ class SportHealthBot:
             state["q_data"]["supplements"] = cur
             # автoсохранение
             try:
-                self.db.save_questionnaire(athlete["id"], state.get("q_data", {}))
+                await self._db_run(self.db.save_questionnaire, athlete["id"], state.get("q_data", {}))
             except Exception as e:
                 logger.error(f"Q autosave: {e}")
             state["step"] = "q_supplements"
@@ -1198,7 +1260,7 @@ class SportHealthBot:
             athlete = self.db.get_athlete_by_telegram_id(user_id)
             if athlete:
                 state["q_data"]["athlete_id"] = athlete["id"]
-                self.db.save_questionnaire(athlete["id"], state["q_data"])
+                await self._db_run(self.db.save_questionnaire, athlete["id"], state["q_data"])
                 self.db.complete_questionnaire(athlete["id"])
             self.clear_state(user_id)
             await update.message.reply_text("✅ *Анкета полностью заполнена!* Спасибо!", parse_mode="Markdown", reply_markup=self.kb([[(f"🏠 Главное меню", "main_menu")]]))
@@ -1250,6 +1312,12 @@ class SportHealthBot:
             else:
                 await update.message.reply_text("Напиши /start для входа.")
 
+        # Сохраняем сессию в БД (переживает рестарт) — асинхронно
+        try:
+            await self.persist_user_state(user_id)
+        except Exception:
+            pass
+
     async def callback_handler(self, update, ctx):
         q = update.callback_query
         try:
@@ -1263,6 +1331,12 @@ class SportHealthBot:
         try:
             if d == "main_menu":
                 await self.show_main_menu(update, ctx)
+            elif d == "consent_accept":
+                # регистрируем согласие и переходим к выбору возрастной группы
+                self.db.record_consent(q.from_user.id)
+                await self.cmd_start(update, ctx)
+            elif d == "consent_decline":
+                await q.edit_message_text("❌ Без согласия на обработку данных использовать бот нельзя.\nЕсли передумаешь — напиши /start.", reply_markup=self.kb([[(f"📄 Дать согласие", "consent_accept")]]), parse_mode="Markdown")
             elif d.startswith("reg_gender_"):
                 await self.reg_gender_callback(update, ctx)
             elif d.startswith("reg_"):
@@ -1409,6 +1483,12 @@ class SportHealthBot:
                 )
             except Exception:
                 pass
+
+        # Сохраняем сессию в БД (переживает рестарт) — асинхронно, без блокировки
+        try:
+            await self.persist_user_state(user_id)
+        except Exception:
+            pass
 
     async def _training_yes(self, update, ctx):
         q = update.callback_query
@@ -3278,7 +3358,7 @@ class SportHealthBot:
             state["q_data"]["train_count"] = int(q.data.replace("q_tcount_", ""))
             # автoсохранение прогресса
             try:
-                self.db.save_questionnaire(athlete["id"], state.get("q_data", {}))
+                await self._db_run(self.db.save_questionnaire, athlete["id"], state.get("q_data", {}))
             except Exception as e:
                 logger.error(f"Q autosave: {e}")
             state["step"] = "q_train_duration"
@@ -3289,7 +3369,7 @@ class SportHealthBot:
             state["q_data"]["train_duration"] = int(q.data.replace("q_tdur_", ""))
             # автoсохранение прогресса
             try:
-                self.db.save_questionnaire(athlete["id"], state.get("q_data", {}))
+                await self._db_run(self.db.save_questionnaire, athlete["id"], state.get("q_data", {}))
             except Exception as e:
                 logger.error(f"Q autosave: {e}")
             state["step"] = "q_season"
@@ -3300,7 +3380,7 @@ class SportHealthBot:
             state["q_data"]["season"] = q.data.replace("q_season_", "")
             # автoсохранение прогресса
             try:
-                self.db.save_questionnaire(athlete["id"], state.get("q_data", {}))
+                await self._db_run(self.db.save_questionnaire, athlete["id"], state.get("q_data", {}))
             except Exception as e:
                 logger.error(f"Q autosave: {e}")
             state["step"] = "q_form"
@@ -3311,7 +3391,7 @@ class SportHealthBot:
             state["q_data"]["form_score"] = int(q.data.replace("q_form_", ""))
             # автoсохранение прогресса
             try:
-                self.db.save_questionnaire(athlete["id"], state.get("q_data", {}))
+                await self._db_run(self.db.save_questionnaire, athlete["id"], state.get("q_data", {}))
             except Exception as e:
                 logger.error(f"Q autosave: {e}")
             state["step"] = "q_sleep_score"
@@ -3322,7 +3402,7 @@ class SportHealthBot:
             state["q_data"]["sleep_score"] = int(q.data.replace("q_sleep_", ""))
             # автoсохранение прогресса
             try:
-                self.db.save_questionnaire(athlete["id"], state.get("q_data", {}))
+                await self._db_run(self.db.save_questionnaire, athlete["id"], state.get("q_data", {}))
             except Exception as e:
                 logger.error(f"Q autosave: {e}")
             state["step"] = "q_warmup"
@@ -3333,7 +3413,7 @@ class SportHealthBot:
             state["q_data"]["warmup"] = q.data.replace("q_warm_", "")
             # автoсохранение прогресса
             try:
-                self.db.save_questionnaire(athlete["id"], state.get("q_data", {}))
+                await self._db_run(self.db.save_questionnaire, athlete["id"], state.get("q_data", {}))
             except Exception as e:
                 logger.error(f"Q autosave: {e}")
             state["step"] = "q_recovery"
@@ -3344,7 +3424,7 @@ class SportHealthBot:
             state["q_data"]["recovery"] = q.data.replace("q_rec_", "")
             # автoсохранение прогресса
             try:
-                self.db.save_questionnaire(athlete["id"], state.get("q_data", {}))
+                await self._db_run(self.db.save_questionnaire, athlete["id"], state.get("q_data", {}))
             except Exception as e:
                 logger.error(f"Q autosave: {e}")
             state["step"] = "q_water"
@@ -3355,7 +3435,7 @@ class SportHealthBot:
             state["q_data"]["water"] = float(q.data.replace("q_water_", ""))
             # автoсохранение прогресса
             try:
-                self.db.save_questionnaire(athlete["id"], state.get("q_data", {}))
+                await self._db_run(self.db.save_questionnaire, athlete["id"], state.get("q_data", {}))
             except Exception as e:
                 logger.error(f"Q autosave: {e}")
             state["step"] = "q_diet"
@@ -3366,7 +3446,7 @@ class SportHealthBot:
             state["q_data"]["diet"] = q.data.replace("q_diet_", "")
             # автoсохранение прогресса
             try:
-                self.db.save_questionnaire(athlete["id"], state.get("q_data", {}))
+                await self._db_run(self.db.save_questionnaire, athlete["id"], state.get("q_data", {}))
             except Exception as e:
                 logger.error(f"Q autosave: {e}")
             state["step"] = "q_pre_meal"
@@ -3377,7 +3457,7 @@ class SportHealthBot:
             state["q_data"]["pre_meal"] = q.data.replace("q_meal_", "")
             # автoсохранение прогресса
             try:
-                self.db.save_questionnaire(athlete["id"], state.get("q_data", {}))
+                await self._db_run(self.db.save_questionnaire, athlete["id"], state.get("q_data", {}))
             except Exception as e:
                 logger.error(f"Q autosave: {e}")
             state["step"] = "q_supplements"
@@ -3394,7 +3474,7 @@ class SportHealthBot:
                     state["q_data"]["supplements"] = "Ничего"
                 # автoсохранение
                 try:
-                    self.db.save_questionnaire(athlete["id"], state.get("q_data", {}))
+                    await self._db_run(self.db.save_questionnaire, athlete["id"], state.get("q_data", {}))
                 except Exception as e:
                     logger.error(f"Q autosave: {e}")
                 state["step"] = "q_motivation"
@@ -3427,7 +3507,7 @@ class SportHealthBot:
                 state["q_data"]["supplements"] = cur
                 # автoсохранение
                 try:
-                    self.db.save_questionnaire(athlete["id"], state.get("q_data", {}))
+                    await self._db_run(self.db.save_questionnaire, athlete["id"], state.get("q_data", {}))
                 except Exception as e:
                     logger.error(f"Q autosave: {e}")
                 # перерисовать кнопки с отметками
@@ -3438,7 +3518,7 @@ class SportHealthBot:
             state["q_data"]["supplements"] = q.data.replace("q_supp_", "")
             # автoсохранение
             try:
-                self.db.save_questionnaire(athlete["id"], state.get("q_data", {}))
+                await self._db_run(self.db.save_questionnaire, athlete["id"], state.get("q_data", {}))
             except Exception as e:
                 logger.error(f"Q autosave: {e}")
             state["step"] = "q_motivation"
@@ -3453,7 +3533,7 @@ class SportHealthBot:
             state["q_data"]["motivation"] = int(q.data.replace("q_motiv_", ""))
             # автoсохранение прогресса
             try:
-                self.db.save_questionnaire(athlete["id"], state.get("q_data", {}))
+                await self._db_run(self.db.save_questionnaire, athlete["id"], state.get("q_data", {}))
             except Exception as e:
                 logger.error(f"Q autosave: {e}")
             state["step"] = "q_stress"
@@ -3464,7 +3544,7 @@ class SportHealthBot:
             state["q_data"]["stress"] = q.data.replace("q_stress_", "")
             # автoсохранение прогресса
             try:
-                self.db.save_questionnaire(athlete["id"], state.get("q_data", {}))
+                await self._db_run(self.db.save_questionnaire, athlete["id"], state.get("q_data", {}))
             except Exception as e:
                 logger.error(f"Q autosave: {e}")
             state["step"] = "q_match_state"
@@ -3475,7 +3555,7 @@ class SportHealthBot:
             state["q_data"]["match_state"] = q.data.replace("q_match_", "")
             # автoсохранение прогресса
             try:
-                self.db.save_questionnaire(athlete["id"], state.get("q_data", {}))
+                await self._db_run(self.db.save_questionnaire, athlete["id"], state.get("q_data", {}))
             except Exception as e:
                 logger.error(f"Q autosave: {e}")
             state["step"] = "q_reinjury"
@@ -3486,7 +3566,7 @@ class SportHealthBot:
             state["q_data"]["reinjury_fear"] = q.data.replace("q_reinj_", "")
             # автoсохранение прогресса
             try:
-                self.db.save_questionnaire(athlete["id"], state.get("q_data", {}))
+                await self._db_run(self.db.save_questionnaire, athlete["id"], state.get("q_data", {}))
             except Exception as e:
                 logger.error(f"Q autosave: {e}")
             state["step"] = "q_goal"
@@ -3544,7 +3624,7 @@ class SportHealthBot:
         data = state.get("q_data", {})
         athlete = self.db.get_athlete_by_telegram_id(q.from_user.id)
         if athlete:
-            self.db.save_questionnaire(athlete["id"], data)
+            await self._db_run(self.db.save_questionnaire, athlete["id"], data)
             self.db.complete_questionnaire(athlete["id"])
         self.clear_state(q.from_user.id)
         await q.edit_message_text("✅ *Анкета полностью заполнена!*\n\nДанные сохранены и доступны врачу.", parse_mode="Markdown", reply_markup=self.kb([[(f"🏠 Главное меню", "main_menu")]]))
@@ -3821,3 +3901,4 @@ class SportHealthBot:
 if __name__ == "__main__":
     bot = SportHealthBot()
     bot.run()
+

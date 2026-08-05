@@ -27,8 +27,13 @@ class Database:
     def __init__(self, db_path: str = None):
         self.db_path = Path(db_path) if db_path else DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.db_path))
+        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        # WAL-журнал повышает конкурентность чтения/записи (важно при асинхронном доступе)
+        try:
+            self.conn.execute("PRAGMA journal_mode=WAL")
+        except Exception:
+            pass
         self._create_tables()
 
     def _create_tables(self):
@@ -138,6 +143,19 @@ class Database:
             banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             banned_by INTEGER,
             reason TEXT
+        )""")
+        # Согласие на обработку ПДн (152-ФЗ)
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS consents (
+            user_id INTEGER PRIMARY KEY,
+            athlete_id INTEGER,
+            accepted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            ip_tz TEXT
+        )""")
+        # Персистентное хранение пользовательских сессий (переживает рестарты)
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS user_states (
+            user_id INTEGER PRIMARY KEY,
+            payload TEXT,
+            updated_at TIMESTAMP
         )""")
         # Индексы для ускорения частых запросов (производительность при росте данных)
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_wellness_athlete_date ON daily_wellness(athlete_id, survey_date)")
@@ -482,7 +500,9 @@ class Database:
         d = dict(row)
         try:
             from encryptor import decrypt_value
-            for pk in ("phone", "birth_date"):
+            for pk in ("phone", "birth_date", "trauma_12m_detail", "pain_now_detail",
+                       "chronic_detail", "surgery_detail", "surgery_date", "meds_detail",
+                       "allergies_detail", "goal", "wish"):
                 if d.get(pk):
                     d[pk] = decrypt_value(d[pk])
         except Exception as e:
@@ -506,7 +526,9 @@ class Database:
         d = dict(row)
         try:
             from encryptor import decrypt_value
-            for pk in ("phone", "birth_date"):
+            for pk in ("phone", "birth_date", "trauma_12m_detail", "pain_now_detail",
+                       "chronic_detail", "surgery_detail", "surgery_date", "meds_detail",
+                       "allergies_detail", "goal", "wish"):
                 if d.get(pk):
                     d[pk] = decrypt_value(d[pk])
         except Exception as e:
@@ -538,10 +560,13 @@ class Database:
         for k, v in clean.items():
             if isinstance(v, list):
                 clean[k] = ", ".join(str(x) for x in v)
-        # Шифруем персональные данные (телефон, дата рождения) — см. encryptor
+        # Шифруем персональные данные (телефон, др, тексты с мед. деталями) — см. encryptor
         try:
             from encryptor import encrypt_value
-            for pk in ("phone", "birth_date"):
+            enc_fields = ("phone", "birth_date", "trauma_12m_detail", "pain_now_detail",
+                          "chronic_detail", "surgery_detail", "surgery_date", "meds_detail",
+                          "allergies_detail", "goal", "wish")
+            for pk in enc_fields:
                 if pk in clean and clean[pk] not in (None, ""):
                     clean[pk] = encrypt_value(clean[pk])
         except Exception as e:
@@ -563,3 +588,64 @@ class Database:
     def complete_questionnaire(self, athlete_id):
         self.conn.execute("UPDATE questionnaires SET completed_at = datetime('now') WHERE athlete_id = ?", (athlete_id,))
         self.conn.commit()
+
+    # ============ СОГЛАСИЕ НА ОБРАБОТКУ ПДн (152-ФЗ) ============
+    def has_consent(self, user_id) -> bool:
+        try:
+            row = self.conn.execute("SELECT 1 FROM consents WHERE user_id = ?", (user_id,)).fetchone()
+            return row is not None
+        except Exception:
+            return False
+
+    def record_consent(self, user_id, athlete_id=None) -> bool:
+        try:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO consents (user_id, athlete_id, ip_tz) VALUES (?, ?, ?)",
+                (user_id, athlete_id, None)
+            )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"record_consent: {e}")
+            return False
+
+    def revoke_consent(self, user_id) -> bool:
+        try:
+            self.conn.execute("DELETE FROM consents WHERE user_id = ?", (user_id,))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"revoke_consent: {e}")
+            return False
+
+    # ============ ПЕРСИСТЕНТНЫЕ СЕССИИ (user_states) ============
+    def load_user_state(self, user_id):
+        """Загрузить состояние пользователя из БД (JSON-строка). None если нет."""
+        try:
+            row = self.conn.execute("SELECT payload FROM user_states WHERE user_id = ?", (user_id,)).fetchone()
+            return row["payload"] if row else None
+        except Exception as e:
+            logger.error(f"load_user_state: {e}")
+            return None
+
+    def save_user_state(self, user_id, payload) -> bool:
+        try:
+            import json as _json
+            self.conn.execute(
+                "INSERT OR REPLACE INTO user_states (user_id, payload, updated_at) VALUES (?, ?, datetime('now'))",
+                (user_id, _json.dumps(payload, ensure_ascii=False, default=str))
+            )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"save_user_state: {e}")
+            return False
+
+    def delete_user_state(self, user_id) -> bool:
+        try:
+            self.conn.execute("DELETE FROM user_states WHERE user_id = ?", (user_id,))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"delete_user_state: {e}")
+            return False
