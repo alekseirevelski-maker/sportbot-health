@@ -8,6 +8,8 @@ from collections import defaultdict
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.drawing.image import Image as XLImage
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -37,7 +39,21 @@ if PROXY_URL:
 
 from database import Database, TEAMS
 
-logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
+# TESTING flag — disables all outgoing notifications to athletes
+TESTING = os.environ.get("TESTING", "").lower() in ("true", "1", "yes")
+
+class _TokenFilter(logging.Filter):
+    def filter(self, record):
+        if BOT_TOKEN and BOT_TOKEN in record.getMessage():
+            record.msg = record.msg.replace(BOT_TOKEN, "***TOKEN***")
+        return True
+
+from logging.handlers import RotatingFileHandler
+_log_handler = RotatingFileHandler("bot.log", maxBytes=5*1024*1024, backupCount=3, encoding="utf-8")
+_log_handler.addFilter(_TokenFilter())
+_console = logging.StreamHandler()
+_console.addFilter(_TokenFilter())
+logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO, handlers=[_log_handler, _console])
 logger = logging.getLogger(__name__)
 
 ADMIN_TELEGRAM_IDS = ADMIN_IDS
@@ -219,6 +235,30 @@ class SportHealthBot:
         parts = str(full_name).split()
         return parts[-1] if len(parts) > 1 else str(full_name)
 
+    def _logo_file(self):
+        """Открывает файл клубной эмблемы для отправки фото. None — если файла нет."""
+        for p in ("logo_cbk.png",):
+            if os.path.exists(p):
+                try:
+                    return open(p, "rb")
+                except OSError:
+                    return None
+        return None
+
+    def _add_logo_to_ws(self, ws, anchor="A1", size=90):
+        """Вставляет эмблему клуба на лист Excel. Нет файла — ничего не делает."""
+        try:
+            if not os.path.exists("logo_cbk.png"):
+                return
+            img = XLImage("logo_cbk.png")
+            # эмблема 480x480 квадратная — уменьшаем до size px, сохраняя пропорции
+            img.width = size
+            img.height = size
+            img.anchor = anchor
+            ws.add_image(img)
+        except Exception as e:
+            logger.warning(f"logo insert failed: {e}")
+
     def kb(self, buttons):
         # Отфильтровываем пустые строки кнопок
         buttons = [row for row in buttons if row]
@@ -227,7 +267,7 @@ class SportHealthBot:
             for row in buttons
         ])
 
-    def score_buttons(self, prefix, mn=1, mx=7):
+    def score_buttons(self, prefix, mn=1, mx=7, add_cancel=True):
         buttons, row = [], []
         for i in range(mn, mx + 1):
             row.append((f"{get_score_emoji(i)} {i}", f"srv_{prefix}_{i}"))
@@ -236,6 +276,8 @@ class SportHealthBot:
                 row = []
         if row:
             buttons.append(row)
+        if add_cancel:
+            buttons.append([("❌ Отмена", "main_menu")])
         return buttons
 
     # ==================== ГЛАВНОЕ МЕНЮ ====================
@@ -338,6 +380,16 @@ class SportHealthBot:
         if update.callback_query:
             await update.callback_query.edit_message_text(text, reply_markup=self.kb(buttons), parse_mode="Markdown")
         else:
+            # Вход из /start: эмблема отдельной карточкой + текстовое меню (которое можно редактировать)
+            _logo = self._logo_file()
+            if _logo is not None:
+                try:
+                    await update.message.reply_photo(_logo)
+                except Exception as e:
+                    logger.warning(f"logo in menu failed, fallback to text: {e}")
+                finally:
+                    try: _logo.close()
+                    except Exception: pass
             await update.message.reply_text(text, reply_markup=self.kb(buttons), parse_mode="Markdown")
 
     # ==================== СТАРТ / РЕГИСТРАЦИЯ ====================
@@ -386,7 +438,19 @@ class SportHealthBot:
             f"Выбери свою возрастную группу:"
         )
         buttons = [[(desc, f"reg_{key}")] for key, desc in AGE_GROUPS.items()]
-        await update.message.reply_text(text, reply_markup=self.kb(buttons), parse_mode="Markdown")
+        _logo = self._logo_file()
+        if _logo is not None:
+            try:
+                # Эмблема — отдельной карточкой (без кнопок), чтобы текстовое меню было редактируемым
+                await update.message.reply_photo(_logo)
+            except Exception as e:
+                logger.warning(f"logo in /start failed, fallback to text: {e}")
+            finally:
+                try: _logo.close()
+                except Exception: pass
+            await update.message.reply_text(text, reply_markup=self.kb(buttons), parse_mode="Markdown")
+        else:
+            await update.message.reply_text(text, reply_markup=self.kb(buttons), parse_mode="Markdown")
 
     async def reg_callback(self, update, ctx):
         q = update.callback_query
@@ -684,6 +748,26 @@ class SportHealthBot:
         prev = self.db.get_athlete_stats(athlete["id"], 14)
         streak = athlete.get("survey_streak", 0)
 
+        # Рост/вес из анкеты + расчёт ИМТ
+        bmi_line = ""
+        qd = self.db.get_questionnaire(athlete["id"])
+        if qd:
+            h = qd.get("height")
+            w = qd.get("weight")
+            if h and w:
+                h = float(h); w = float(w)
+                if 0 < h < 400 and 0 < w < 300:
+                    bmi = w / (h / 100) ** 2
+                    if bmi < 18.5:
+                        cat, emoji = "недостаточный вес", "⚠️"
+                    elif bmi < 25:
+                        cat, emoji = "норма", "✅"
+                    elif bmi < 30:
+                        cat, emoji = "избыточный вес", "⚠️"
+                    else:
+                        cat, emoji = "ожирение", "🔴"
+                    bmi_line = f"📏 Рост: {int(h)} см | ⚖️ Вес: {int(w)} кг\n🧮 ИМТ: {bmi:.1f} ({emoji} {cat})\n"
+
         # Hooper Index
         sleep_avg = stats.get("avg_sleep", 0) or 0
         stress_avg = stats.get("avg_stress", 0) or 0
@@ -703,7 +787,8 @@ class SportHealthBot:
             f"*{athlete['full_name']}*\n"
             f"📋 {athlete['age_group']} | 🏀 {athlete.get('team', '?')}\n"
             f"🔥 Серия: {streak}д | {get_rank(streak)}\n"
-            f"📊 Опросов: {athlete.get('total_surveys', 0)}\n\n"
+            f"📊 Опросов: {athlete.get('total_surveys', 0)}\n"
+            f"{bmi_line}\n"
             f"📊 *Готовность:* {ready} ({hooper:.0f}/35)\n"
             f"*Средние за 7 дней:*\n"
             f"😴 Сон: {score_bar(round(sleep_avg))}\n"
@@ -1365,6 +1450,9 @@ class SportHealthBot:
                 await self.show_team(update, ctx)
             elif d == "achievements":
                 await self.show_achievements(update, ctx)
+            elif d == "cancel_survey":
+                self.clear_state(q.from_user.id)
+                await self.show_main_menu(update, ctx)
             elif d == "do_survey":
                 await self.start_survey(update, ctx)
             elif d.startswith("srv_"):
@@ -1438,6 +1526,8 @@ class SportHealthBot:
                 await self.set_reminder_time(update, ctx)
             elif d == "send_reminder_now":
                 await self.send_reminder_now(update, ctx)
+            elif d == "send_q_reminder":
+                await self.send_questionnaire_reminder(update, ctx)
             # === НОВЫЕ ОБРАБОТЧИКИ ===
             elif d == "report_export_menu":
                 await self.report_export_menu(update, ctx)
@@ -1902,6 +1992,7 @@ class SportHealthBot:
             [("🌇 18:00", "set_reminder_18"), ("🌙 20:00", "set_reminder_20")],
             [("✏️ Своё время", "set_reminder_custom")],
             [("📨 Разослать напоминание сейчас", "send_reminder_now")],
+            [("📋 Предложить заполнить анкету", "send_q_reminder")],
             [("🔕 Выключить", "set_reminder_off")],
             [("🔙 Назад", "main_menu")]
         ]
@@ -1930,8 +2021,12 @@ class SportHealthBot:
 
         if data == "send_now":
             await q.edit_message_text("📨 *Отправляю напоминания спортсменам...*", parse_mode="Markdown")
-            await self._send_daily_reminder(None)
-            await q.edit_message_text("✅ *Напоминания отправлены!*", parse_mode="Markdown", reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]]))
+            try:
+                await self._send_daily_reminder(ctx)
+                await q.edit_message_text("✅ *Напоминания отправлены!*", parse_mode="Markdown", reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]]))
+            except Exception as e:
+                logger.error(f"Send now error: {e}")
+                await q.edit_message_text(f"❌ Ошибка: {e}", reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]]))
             return
 
         hour = int(data)
@@ -1968,10 +2063,58 @@ class SportHealthBot:
             return
         await q.edit_message_text("📨 *Отправляю напоминания спортсменам...*", parse_mode="Markdown")
         try:
-            await self._send_daily_reminder(None)
+            await self._send_daily_reminder(ctx)
             await q.edit_message_text("✅ *Напоминания отправлены!*", parse_mode="Markdown", reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]]))
         except Exception as e:
             logger.error(f"Send now error: {e}")
+            await q.edit_message_text(f"❌ Ошибка: {e}", reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]]))
+
+    async def send_questionnaire_reminder(self, update, ctx):
+        """Рассылка тем спортсменам, у кого не заполнена анкета здоровья."""
+        q = update.callback_query
+        await q.answer()
+        if q.from_user.id not in ADMIN_TELEGRAM_IDS:
+            return
+        await q.edit_message_text("📋 *Отправляю предложение заполнить анкету...*", parse_mode="Markdown")
+        try:
+            bot = ctx.bot
+            athletes = self.db.get_all_athletes()
+            target = []
+            for a in athletes:
+                if self.db.has_questionnaire(a["id"]):
+                    continue
+                target.append(a)
+            sent = 0
+            failed = 0
+            for a in target:
+                try:
+                    await bot.send_message(
+                        chat_id=a["telegram_id"],
+                        text=(
+                            "📋 *ЧБК — Анкета здоровья*\n"
+                            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                            f"👋 Привет, {self._first_name(a['full_name'])}!\n\n"
+                            "Мы видим, что ты ещё не заполнил(а) *анкету спортсмена*.\n"
+                            "Она нужна врачу: рост, вес, амплуа, травмы, противопоказания.\n\n"
+                            "⏱️ Это займёт пару минут.\n\n"
+                            "👉 Нажми /start → выбери *«📋 Заполнить анкету»*"
+                        ),
+                        parse_mode="Markdown"
+                    )
+                    sent += 1
+                except Exception as e:
+                    failed += 1
+                    logger.error(f"Q-reminder error for {a['full_name']} (tg={a['telegram_id']}): {e}")
+            logger.info(f"Questionnaire remind sent={sent} failed={failed} of {len(target)}")
+            await q.edit_message_text(
+                f"✅ *Предложение отправлено:* {sent}\n"
+                f"⏭️ Пропущено (уже заполнили): {len(athletes) - len(target)}\n"
+                f"❌ Не доставилось: {failed}\n\n"
+                f"Без анкеты осталось: {len(target)}",
+                parse_mode="Markdown", reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]])
+            )
+        except Exception as e:
+            logger.error(f"Send questionnaire reminder error: {e}")
             await q.edit_message_text(f"❌ Ошибка: {e}", reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]]))
 
     # ==================== ОТЧЕТ ПО ДНЯМ ====================
@@ -2412,6 +2555,12 @@ class SportHealthBot:
         warn_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
         crit_fill = PatternFill(start_color="F8D7DA", end_color="F8D7DA", fill_type="solid")
         gray_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+        # Лёгкая зебра для блоков дней (чередование) + жирная граница стыка дней
+        zebra_fill = PatternFill(start_color="EAF1FB", end_color="EAF1FB", fill_type="solid")
+        zebra_hdr_fill = PatternFill(start_color="8EAADB", end_color="8EAADB", fill_type="solid")
+        day_side = Side(style="medium", color="1F4E79")
+        day_right = Border(left=thin_border.left, right=day_side, top=thin_border.top, bottom=thin_border.bottom)
+        day_left = Border(left=day_side, right=thin_border.right, top=thin_border.top, bottom=thin_border.bottom)
         title_font = Font(bold=True, size=14, color="1F4E79")
         subtitle_font = Font(bold=True, size=10, color="808080")
         bold_font = Font(bold=True, size=10)
@@ -2498,6 +2647,9 @@ class SportHealthBot:
         for ci in range(5, 9):
             cell(ws0, r, ci, "-", align=center)
         r += 1
+
+        # эмблема клуба в правом верхнем углу листа «Сводка»
+        self._add_logo_to_ws(ws0, anchor="J3", size=90)
 
         for ci in range(1, 9):
             ws0.column_dimensions[chr(64+ci)].width = 18
@@ -2587,17 +2739,26 @@ class SportHealthBot:
             ws.merge_cells(start_row=SR_DATE, start_column=1, end_row=SR_METR, end_column=1)
             cell(ws, SR_DATE, 1, "Игрок", font=hf, fill=hfl, align=hdr_align)
             col = 2
-            for dt in all_dates:
+            for di, dt in enumerate(all_dates):
                 try:
                     from datetime import datetime as _ddt
                     wd = namedays[_ddt.strptime(dt, "%Y-%m-%d").weekday()]
                     datelabel = dt[5:] + "\n" + wd
                 except Exception:
                     datelabel = dt[5:]
+                # лёгкая зебра: чётные блоки дней — светло-голубой фон у ячейки даты (и её блока)
+                hdr_fill = zebra_hdr_fill if di % 2 == 1 else hfl
                 ws.merge_cells(start_row=SR_DATE, start_column=col, end_row=SR_DATE, end_column=col + len(metrics) - 1)
-                cell(ws, SR_DATE, col, datelabel, font=hf, fill=hfl, align=hdr_align)
+                cell(ws, SR_DATE, col, datelabel, font=hf, fill=hdr_fill, align=hdr_align)
+                # жирная граница справа у последней колонки блока дня (визуальный стык дней)
+                last_col = col + len(metrics) - 1
                 for k, m in enumerate(metrics):
-                    cell(ws, SR_METR, col + k, m, font=Font(bold=True, size=8, color="FFFFFF"), fill=hfl, align=hdr_align)
+                    bd = day_right if (col + k) == last_col else thin_border
+                    cell(ws, SR_METR, col + k, m, font=Font(bold=True, size=8, color="FFFFFF"), fill=hfl, align=hdr_align, border=bd)
+                    if (col + k) == last_col:
+                        # жирный правый борт и у ячейки даты
+                        dc = ws.cell(row=SR_DATE, column=last_col)
+                        dc.border = Border(left=thin_border.left, right=day_side, top=thin_border.top, bottom=thin_border.bottom)
                 col += len(metrics)
             # колонка «Ср.» объединена по двум строкам
             ws.merge_cells(start_row=SR_DATE, start_column=col, end_row=SR_METR, end_column=col)
@@ -2623,6 +2784,8 @@ class SportHealthBot:
                             for k in range(len(metrics)):
                                 cc = cell(ws, r, col + k, "", border=thin_border)
                                 cc.fill = gray_fill
+                                if k == len(metrics) - 1:
+                                    cc.border = day_right
                             col += len(metrics)
                             continue
                         for k, m in enumerate(metrics):
@@ -2645,6 +2808,9 @@ class SportHealthBot:
                                     cc.fill = self._xl_score_fill(v)
                                 if m == "Hooper":
                                     ho_list.append(v)
+                        # жирная граница справа у последней колонки блока дня (стык дней)
+                        last_col = col + len(metrics) - 1
+                        ws.cell(row=r, column=last_col).border = day_right
                         col += len(metrics)
                     # средний Hooper в колонке «Ср.»
                     if ho_list:
@@ -2665,6 +2831,9 @@ class SportHealthBot:
                 if ws.column_dimensions[cl].width < 5.2:
                     ws.column_dimensions[cl].width = 5.2
             ws.column_dimensions[get_column_letter(SRCOL)].width = 8
+
+            # эмблема клуба в правом верхнем углу листа команды (после последней колонки матрицы)
+            self._add_logo_to_ws(ws, anchor=f"{get_column_letter(SRCOL + 2)}{SR_DATE}", size=80)
 
         # Убираем move_worksheet - Сводка уже первый лист
         output = io.BytesIO()
@@ -3357,8 +3526,14 @@ class SportHealthBot:
 
         if step == "q_experience":
             data["experience"] = q.data.replace("q_exp_", "")
-            state["step"] = "q_trauma_12m"
-            await q.edit_message_text("📋 *Блок 2: Травмы и самочувствие*\n\nБыли травмы за последние 12 месяцев?", reply_markup=self.kb([[("Да", "q_trauma_Да"), ("Нет", "q_trauma_Нет")]]), parse_mode="Markdown")
+            state["step"] = "q_height_weight"
+            await q.edit_message_text(
+                "📋 *Блок 1: Общие данные*\n\n"
+                "📏 *Введи рост и вес через пробел:*\n"
+                "Например: `185 82`\n\n"
+                "Если не знаешь — напиши «-»",
+                parse_mode="Markdown"
+            )
             return
 
         if step == "q_trauma_12m":
@@ -3931,6 +4106,19 @@ class SportHealthBot:
         except Exception as e:
             logger.error(f"Doctor summary error: {e}")
 
+
+    @staticmethod
+    async def error_handler(update, context):
+        """Global error handler."""
+        logger.error("Exception: %s", context.error, exc_info=context.error)
+        if update and update.effective_message:
+            try:
+                await update.effective_message.reply_text(
+                    "\u26a0\ufe0f \u041f\u0440\u043e\u0438\u0437\u043e\u0448\u043b\u0430 \u043e\u0448\u0438\u0431\u043a\u0430. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u043f\u043e\u0437\u0436\u0435 \u0438\u043b\u0438 \u043d\u0430\u043f\u0438\u0448\u0438\u0442\u0435 /start"
+                )
+            except Exception:
+                pass
+
     def run(self):
         app = (
             Application.builder()
@@ -3939,6 +4127,12 @@ class SportHealthBot:
         if PROXY_URL:
             app = app.proxy(PROXY_URL).get_updates_proxy(PROXY_URL)
         app = app.build()
+
+        # Global error handler
+        app.add_error_handler(self.error_handler)
+
+        if TESTING:
+            logger.warning('TESTING MODE — notifications disabled')
 
         # Периодическая очистка неактивных сессий (защита от утечки памяти)
         try:

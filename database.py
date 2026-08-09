@@ -161,6 +161,29 @@ class Database:
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_wellness_athlete_date ON daily_wellness(athlete_id, survey_date)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_q_athlete ON questionnaires(athlete_id)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_athletes_team ON athletes(team)")
+        # Schema version tracking
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER PRIMARY KEY,
+            applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            description TEXT
+        )""")
+
+        # Consultations table
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS consultations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            athlete_id INTEGER NOT NULL,
+            complaints TEXT,
+            consult_date TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            admin_notes TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (athlete_id) REFERENCES athletes(id)
+        )""")
+
+        # Index for athletes by telegram_id (fast lookup during registration)
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_athletes_telegram ON athletes(telegram_id)")
+
+        
         # Миграция: добавляем колонки в questionnaires для существующих БД (CREATE IF NOT EXISTS их не добавит)
         for col, coltype in (("phone", "TEXT"), ("birth_date", "TEXT"), ("surgery_date", "TEXT"),
                              ("allergies", "TEXT"), ("allergies_detail", "TEXT")):
@@ -454,6 +477,72 @@ class Database:
             "SELECT * FROM athletes WHERE team = ? ORDER BY full_name", (team,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+    # ============ КОНСУЛЬТАЦИИ ============
+    def save_consultation(self, athlete_id: int, complaints: str, consult_date: str) -> bool:
+        try:
+            self.conn.execute(
+                "INSERT INTO consultations (athlete_id, complaints, consult_date) VALUES (?, ?, ?)",
+                (athlete_id, complaints, consult_date)
+            )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"save_consultation: {e}")
+            return False
+
+    def get_consultations(self, status: str = None) -> list:
+        try:
+            if status:
+                rows = self.conn.execute(
+                    """SELECT c.*, a.full_name, a.team FROM consultations c
+                       JOIN athletes a ON c.athlete_id = a.id
+                       WHERE c.status = ? ORDER BY c.created_at DESC""",
+                    (status,)
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    """SELECT c.*, a.full_name, a.team FROM consultations c
+                       JOIN athletes a ON c.athlete_id = a.id
+                       ORDER BY c.created_at DESC"""
+                ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            logger.error(f"get_consultations: {e}")
+            return []
+
+    def update_consultation_status(self, consult_id: int, status: str, admin_notes: str = None) -> bool:
+        try:
+            if admin_notes:
+                self.conn.execute(
+                    "UPDATE consultations SET status = ?, admin_notes = ? WHERE id = ?",
+                    (status, admin_notes, consult_id)
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE consultations SET status = ? WHERE id = ?", (status, consult_id)
+                )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"update_consultation_status: {e}")
+            return False
+
+
+    def delete_athlete(self, athlete_id: int) -> bool:
+        try:
+            self.conn.execute("DELETE FROM daily_wellness WHERE athlete_id = ?", (athlete_id,))
+            self.conn.execute("DELETE FROM alerts WHERE athlete_id = ?", (athlete_id,))
+            self.conn.execute("DELETE FROM questionnaires WHERE athlete_id = ?", (athlete_id,))
+            self.conn.execute("DELETE FROM consultations WHERE athlete_id = ?", (athlete_id,))
+            self.conn.execute("DELETE FROM banned_athletes WHERE athlete_id = ?", (athlete_id,))
+            self.conn.execute("DELETE FROM athletes WHERE id = ?", (athlete_id,))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"delete_athlete: {e}")
+            return False
 
     def close(self):
         self.conn.close()
