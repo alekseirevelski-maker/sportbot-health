@@ -188,17 +188,29 @@ def parse_scale_csv(content: str, filename: str = "") -> list:
 
 
 def parse_scale_csv_dated(content: str, filename: str = "") -> list:
+<<<<<<< HEAD
     """Парсит и дедуплицирует по (дата, профиль) — за каждый день для каждого профиля
     берём последнюю строку. (Уникальность в БД — UNIQUE(athlete_id, record_date), но разные
     профили/спортсмены взвешиваются в один день, поэтому группировка по одной дате НЕ годится.)"""
     records = parse_scale_csv(content, filename)
     by_key = {}
+=======
+    """Парсит и дедуплицирует по дате (за каждый день берём последнюю строку)."""
+    records = parse_scale_csv(content, filename)
+    by_date = {}
+>>>>>>> origin/main
     for r in records:
         d = r.get("record_date")
         if not d:
             continue
+<<<<<<< HEAD
         prof = r.get("device_profile") or ""
         key = (d, prof)
         # последняя строка за (дата, профиль) выигрывает
         by_key[key] = r
     return list(by_key.values())
+=======
+        # последняя строка за день выигрывает
+        by_date[d] = r
+    return list(by_date.values())
+>>>>>>> origin/main

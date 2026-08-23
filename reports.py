@@ -68,10 +68,17 @@ class ReportGenerator:
             f.write(f"АВТОМАТИЧЕСКИЕ РЕКОМЕНДАЦИИ\n")
             f.write(f"{'='*40}\n\n")
 
+            recs_count = 0
             for s in surveys:
                 if s.get('auto_recommendation'):
                     f.write(f"📅 {s['survey_date']}:\n")
                     f.write(f"  {s['auto_recommendation']}\n\n")
+                    recs_count += 1
+            if recs_count == 0:
+                f.write("Нет данных за период (рекомендации не формировались).\n\n")
+
+            f.write(f"\n{'='*40}\n")
+            f.write("Отчёт носит информационный характер и НЕ является медицинским заключением (ст. 323-ФЗ). При сомнениях — обратитесь к врачу лично.\n")
 
         return str(report_path)
 
@@ -111,5 +118,8 @@ class ReportGenerator:
 
             for a in athletes:
                 f.write(f"• {a['full_name']} ({a['age_group']})\n")
+
+            f.write(f"\n{'='*40}\n")
+            f.write("Отчёт носит информационный характер и НЕ является медицинским заключением (ст. 323-ФЗ). При сомнениях — обратитесь к врачу лично.\n")
 
         return str(report_path)

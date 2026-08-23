@@ -8,24 +8,6 @@ load_dotenv(Path(__file__).parent / ".env")
 
 BOT_TOKEN = os.environ.get("SPORT_BOT_TOKEN", "")
 
-# ============ АДМИНЫ И НАПОМИНАНИЯ (через .env) ============
-_ADMIN_FALLBACK = {351572247}
-
-
-def _parse_admin_ids(raw: str) -> set:
-    ids = set()
-    for part in (raw or "").split(","):
-        part = part.strip()
-        if part.isdigit():
-            ids.add(int(part))
-    return ids
-
-
-ADMIN_IDS = _parse_admin_ids(os.environ.get("ADMIN_IDS", "")) or _ADMIN_FALLBACK
-
-REMINDER_HOUR_DEFAULT = int(os.environ.get("REMINDER_HOUR", "20"))
-REMINDER_MINUTE_DEFAULT = int(os.environ.get("REMINDER_MINUTE", "0"))
-
 # ============ НАСТРОЙКИ UI ============
 COLORS = {
     "primary": "#1E90FF",
@@ -121,6 +103,28 @@ HR_NORMS = {
     "Pro": {"min": 40, "max": 60},
 }
 
+# ИМТ: перцентили WHO 2007 (5-й и 95-й) для 10-18 лет по полу.
+# У баскетболистов ИМТ слаб (рост/мышцы): <5 перцентиль = скрининг дефицита/роста,
+# >95 перцентиль НЕ алертим без кожных складок (ложные «ожирения» у рослых мускулистых).
+# Ключ: возраст в годах → {"m": (p5, p95), "f": (p5, p95)}
+BMI_PERCENTILES = {
+    10: {"m": (14.4, 19.6), "f": (14.2, 20.1)},
+    11: {"m": (14.7, 20.4), "f": (14.5, 21.0)},
+    12: {"m": (15.0, 21.3), "f": (14.9, 22.1)},
+    13: {"m": (15.4, 22.2), "f": (15.4, 23.2)},
+    14: {"m": (15.9, 23.1), "f": (15.9, 24.3)},
+    15: {"m": (16.4, 24.0), "f": (16.4, 25.2)},
+    16: {"m": (17.0, 24.9), "f": (16.8, 25.9)},
+    17: {"m": (17.5, 25.7), "f": (17.1, 26.4)},
+    18: {"m": (18.0, 26.4), "f": (17.4, 26.9)},
+}
+
+# Возраст (лет) для возрастной группы — используется для подбора перцентиля ИМТ
+AGE_GROUP_YEARS = {
+    "U14": 14, "U15": 15, "U16": 16, "U17": 17, "U18": 18,
+    "U19": 19, "U21": 21, "Pro": 25,
+}
+
 # Мотивационные сообщения
 MOTIVATIONAL_MESSAGES = {
     "streak_3": "🔥 Отлично! Уже 3 дня подряд! Продолжай!",
@@ -150,6 +154,13 @@ PROXY_URL = os.environ.get("PROXY_URL", "http://127.0.0.1:10809")
 # Rate limiting
 RATE_LIMIT_MESSAGES = int(os.environ.get("RATE_LIMIT_MESSAGES", "30"))
 RATE_LIMIT_WINDOW = int(os.environ.get("RATE_LIMIT_WINDOW", "60"))
+
+# Админы (супер-пользователи; врачи/тренеры — в БД)
+ADMIN_IDS = {351572247}
+
+# Напоминания по умолчанию (переопределяются из БД при старте)
+REMINDER_HOUR_DEFAULT = 20
+REMINDER_MINUTE_DEFAULT = 0
 
 
 # Импорт модуля менструального цикла (с научной базой)
