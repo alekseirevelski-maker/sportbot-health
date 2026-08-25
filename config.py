@@ -103,6 +103,52 @@ HR_NORMS = {
     "Pro": {"min": 40, "max": 60},
 }
 
+# Нормы состава тела (биоимпеданс GARLYN Bodyscan Master)
+# Источники: Looney et al. (2024), Iblasi et al. (2025), ESPEN guidelines
+# body_fat_pct: скорректировано +3% (Potter et al., 2021) для приближения к DXA
+BC_NORMS = {
+    "U14": {
+        "male": {"body_fat_pct": (10, 22), "body_water_pct": (55, 65), "visceral_fat_max": 10},
+        "female": {"body_fat_pct": (18, 30), "body_water_pct": (50, 60), "visceral_fat_max": 10},
+    },
+    "U15": {
+        "male": {"body_fat_pct": (10, 20), "body_water_pct": (55, 65), "visceral_fat_max": 10},
+        "female": {"body_fat_pct": (18, 28), "body_water_pct": (50, 60), "visceral_fat_max": 10},
+    },
+    "U16": {
+        "male": {"body_fat_pct": (10, 18), "body_water_pct": (55, 65), "visceral_fat_max": 10},
+        "female": {"body_fat_pct": (18, 26), "body_water_pct": (50, 60), "visceral_fat_max": 10},
+    },
+    "U17": {
+        "male": {"body_fat_pct": (10, 18), "body_water_pct": (55, 65), "visceral_fat_max": 10},
+        "female": {"body_fat_pct": (18, 26), "body_water_pct": (50, 60), "visceral_fat_max": 10},
+    },
+    "U18": {
+        "male": {"body_fat_pct": (10, 18), "body_water_pct": (55, 65), "visceral_fat_max": 10},
+        "female": {"body_fat_pct": (18, 26), "body_water_pct": (50, 60), "visceral_fat_max": 10},
+    },
+    "U19": {
+        "male": {"body_fat_pct": (10, 18), "body_water_pct": (55, 65), "visceral_fat_max": 10},
+        "female": {"body_fat_pct": (18, 26), "body_water_pct": (50, 60), "visceral_fat_max": 10},
+    },
+    "U21": {
+        "male": {"body_fat_pct": (10, 18), "body_water_pct": (55, 65), "visceral_fat_max": 10},
+        "female": {"body_fat_pct": (18, 26), "body_water_pct": (50, 60), "visceral_fat_max": 10},
+    },
+    "Pro": {
+        "male": {"body_fat_pct": (8, 18), "body_water_pct": (55, 65), "visceral_fat_max": 10},
+        "female": {"body_fat_pct": (16, 26), "body_water_pct": (50, 60), "visceral_fat_max": 10},
+    },
+}
+
+# Пороги красных флагов для состава тела (для врача)
+BC_RED_FLAGS = {
+    "fat_change_pct": 5.0,      # изменение жира > ±5% за замер → артефакт
+    "muscle_loss_kg": 1.5,      # потеря мышц > 1.5 кг → катаболизм
+    "water_critical_pct": 52.0,  # вода < 52% → критическое обезвоживание
+    "visceral_risk": 16.0,       # висцеральный жир > 16 → metabolic risk
+}
+
 # ИМТ: перцентили WHO 2007 (5-й и 95-й) для 10-18 лет по полу.
 # У баскетболистов ИМТ слаб (рост/мышцы): <5 перцентиль = скрининг дефицита/роста,
 # >95 перцентиль НЕ алертим без кожных складок (ложные «ожирения» у рослых мускулистых).
@@ -159,7 +205,7 @@ RATE_LIMIT_WINDOW = int(os.environ.get("RATE_LIMIT_WINDOW", "60"))
 ADMIN_IDS = {351572247}
 
 # Напоминания по умолчанию (переопределяются из БД при старте)
-REMINDER_HOUR_DEFAULT = 20
+REMINDER_HOUR_DEFAULT = 8
 REMINDER_MINUTE_DEFAULT = 0
 
 

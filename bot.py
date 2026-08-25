@@ -25,6 +25,7 @@ from config import (
     MENSTRUAL_ENABLED_GROUPS,
     ADMIN_IDS, REMINDER_HOUR_DEFAULT, REMINDER_MINUTE_DEFAULT,
     BMI_PERCENTILES, AGE_GROUP_YEARS,
+    BC_NORMS, BC_RED_FLAGS,
 )
 from cycle_medicine import (
     get_cycle_phase_info, get_cycle_phase, PHASES,
@@ -761,13 +762,13 @@ class SportHealthBot:
             return
 
         fname = doc.file_name.lower() if doc.file_name else ""
-        supported = [".csv", ".json", ".txt"]
+        supported = [".csv", ".json", ".txt", ".zip"]
         if not any(fname.endswith(ext) for ext in supported):
-            await update.message.reply_text("❌ Формат не поддерживается. Отправь CSV, JSON или TXT.")
+            await update.message.reply_text("❌ Формат не поддерживается. Отправь CSV, JSON, TXT или ZIP (Apple Health).")
             return
 
-        # Лимит размера загружаемого файла (защита от DoS большими файлами)
-        MAX_FILE_BYTES = 5 * 1024 * 1024  # 5 МБ
+        # Лимит размера загружаемого файла (ZIP от Apple Health может быть до 50 МБ)
+        MAX_FILE_BYTES = 50 * 1024 * 1024 if fname.endswith(".zip") else 5 * 1024 * 1024
         if getattr(doc, "file_size", None) and doc.file_size > MAX_FILE_BYTES:
             mb = round(doc.file_size / (1024 * 1024), 1)
             await update.message.reply_text(f"❌ Файл слишком большой ({mb} МБ). Максимум 5 МБ.")
@@ -790,7 +791,7 @@ class SportHealthBot:
                 return
 
             # === Умные часы: обычный путь ===
-            watch_data = parse_watch(text_content, fname)
+            watch_data = parse_watch(text_content, fname, raw_bytes=bytes(content))
 
             if not watch_data:
                 await update.message.reply_text(
@@ -826,7 +827,6 @@ class SportHealthBot:
                 await update.message.reply_text("❌ Сначала зарегистрируйся: /start")
                 return
             saved = 0
-            rows = []
             for r in records:
                 data = dict(r)
                 data["recorded_by"] = user_id
@@ -840,13 +840,14 @@ class SportHealthBot:
                 if self.db.save_body_composition(athlete["id"], r.get("record_date"), data,
                                                  source="csv", device_profile=r.get("device_profile")):
                     saved += 1
-                    rows.append(self._scale_summary_line(r))
-            await update.message.reply_text(
-                f"⚖️ *Импортировано: {saved}* записей состава тела\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                + "\n".join(rows[:15]),
-                reply_markup=self.kb([[(f"🏠 Главное меню", "main_menu")]]),
-                parse_mode="Markdown"
-            )
+            if saved:
+                # Показываем полный анализ + уведомления
+                await self._analyze_and_notify_scale(update, athlete, records)
+            else:
+                await update.message.reply_text(
+                    "⚠️ Не удалось сохранить данные. Проверь формат файла.",
+                    reply_markup=self.kb([[(f"🏠 Главное меню", "main_menu")]])
+                )
             return
 
         # Врач/тренер: группа — раскладываем по профилям
@@ -867,6 +868,47 @@ class SportHealthBot:
             head.append("")
             head.append(f"*Не закреплённые профили:* {', '.join(unmapped)}")
             head.append("Открой ниже «Профили весов» и назначь спортсменов, затем отправь CSV снова.")
+
+        # Уведомления спортсменам, тренерам и врачу по каждому сохранённому замеру
+        if saved:
+            mapping = self.db.get_scale_profiles()
+            notified_athletes = set()
+            for r in records:
+                prof = r.get("device_profile")
+                if not prof:
+                    continue
+                athlete_id = mapping.get(prof)
+                if not athlete_id or athlete_id in notified_athletes:
+                    continue
+                notified_athletes.add(athlete_id)
+                athlete = self.db.get_athlete_by_id(athlete_id)
+                if not athlete:
+                    continue
+                # Уведомление спортсмену
+                try:
+                    athlete_text = self._build_athlete_bc_report(
+                        self.db.get_latest_body_composition(athlete_id),
+                        self.db.get_body_composition(athlete_id, days=90),
+                        athlete
+                    )
+                    await self._send_admin(athlete["telegram_id"], athlete_text)
+                except Exception as e:
+                    logger.error(f"Athlete BC notify error: {e}")
+                # Уведомление тренеру
+                team = athlete.get("team")
+                if team:
+                    try:
+                        coach_text = self._build_coach_bc_report(
+                            self.db.get_latest_body_composition(athlete_id),
+                            self.db.get_body_composition(athlete_id, days=90),
+                            athlete
+                        )
+                        coaches = self.db.get_team_coaches(team)
+                        for cid in coaches:
+                            if cid != athlete.get("telegram_id"):
+                                await self._send_admin(cid, coach_text)
+                    except Exception as e:
+                        logger.error(f"Coach BC notify error: {e}")
 
         # запрос роста, если есть куда сохранять, но нет роста (пришлёт сводку после ввода)
         if saved or (skipped and not unmapped):
@@ -966,9 +1008,85 @@ class SportHealthBot:
             "🔹 *Профили весов* — закрепи «Профиль N» за спортсменом, чтобы бот раскладывал автоматически.\n"
             "🔹 Замеры за один день перезаписываются (хранится последний).",
             reply_markup=self.kb([
+                [(f"📈 Кто взвешился", "bc_overview")],
                 [(f"🗂 Профили весов", "bc_profiles")],
                 [(f"🔙 Назад", "main_menu")]
             ])
+        )
+
+    async def bc_overview(self, update, ctx):
+        """Обзор: кто из спортсменов имеет данные состава тела."""
+        q = update.callback_query
+        await q.answer()
+        if not self._is_admin_or_coach(q.from_user.id):
+            return
+
+        # Получаем всех спортсменов с данными состава тела
+        athletes_with_data = self.db.get_bc_period(days=999)
+        if not athletes_with_data:
+            await q.edit_message_text(
+                "📈 *Кто взвешился*\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "Пока ни один спортсмен не взвешивался.\n"
+                "Отправь CSV-файл весов для импорта.",
+                reply_markup=self.kb([[(f"🔙 Назад", "bc_menu")]])
+            )
+            return
+
+        # Группируем по спортсменам: последний замер + количество
+        latest_by_athlete = {}
+        for row in athletes_with_data:
+            aid = row.get("athlete_id")
+            if aid not in latest_by_athlete:
+                latest_by_athlete[aid] = {
+                    "name": row.get("full_name", "?"),
+                    "team": row.get("team", "?"),
+                    "date": row.get("record_date", "?"),
+                    "weight": row.get("weight_kg"),
+                    "fat": row.get("body_fat_pct"),
+                    "muscle": row.get("muscle_mass_kg"),
+                    "water": row.get("body_water_pct"),
+                    "count": 0
+                }
+            latest_by_athlete[aid]["count"] += 1
+
+        lines = [
+            f"📈 *Кто взвешился* ({len(latest_by_athlete)} спортсменов)",
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        ]
+
+        # Группируем по командам
+        by_team = {}
+        for aid, info in latest_by_athlete.items():
+            team = info["team"]
+            by_team.setdefault(team, []).append((aid, info))
+
+        for team in sorted(by_team.keys()):
+            lines.append(f"*{team}*")
+            for aid, info in sorted(by_team[team], key=lambda x: x[1]["name"]):
+                weight = f"{info['weight']:.1f}кг" if info['weight'] else "—"
+                fat = f"{info['fat']:.1f}%" if info['fat'] else "—"
+                muscle = f"{info['muscle']:.1f}кг" if info['muscle'] else "—"
+                lines.append(
+                    f"  👤 {info['name']} | 📅 {info['date']} | "
+                    f"⚖️ {weight} | жир {fat} | мышцы {muscle} | замеров: {info['count']}"
+                )
+            lines.append("")
+
+        # Кнопки для просмотра деталей
+        btns = []
+        for aid, info in sorted(latest_by_athlete.items(), key=lambda x: x[1]["name"]):
+            btns.append([(f"📊 {info['name']}", f"bc_view_{aid}")])
+        btns.append([("🔙 Назад", "bc_menu")])
+
+        # Ограничиваем количество кнопок (Telegram лимит ~100)
+        if len(btns) > 50:
+            btns = btns[:50]
+            lines.append(f"\n_… и ещё {len(latest_by_athlete) - 50} спортсменов_")
+
+        await q.edit_message_text(
+            "\n".join(lines),
+            reply_markup=self.kb(btns),
+            parse_mode="Markdown"
         )
 
     async def bc_show_profiles(self, update, ctx, page=0):
@@ -1156,6 +1274,298 @@ class SportHealthBot:
                 skipped += 1
         return saved, skipped, unmapped, rows
 
+    # ==================== АНАЛИЗ СОСТАВА ТЕЛА + УВЕДОМЛЕНИЯ ====================
+
+    def _get_bc_status(self, value, norms_key, gender="male"):
+        """Получить статус показателя: ✅ норма, ⚠️ погранично, 🚨 отклонение."""
+        if value is None:
+            return ""
+        norms = BC_NORMS.get(self._current_age_group, BC_NORMS.get("Pro", {}))
+        gender_norms = norms.get(gender, norms.get("male", {}))
+        norm_range = gender_norms.get(norms_key)
+        if not norm_range:
+            return ""
+        low, high = norm_range
+        if low <= value <= high:
+            return "✅"
+        elif value < low * 0.9 or value > high * 1.1:
+            return "🚨"
+        else:
+            return "⚠️"
+
+    def _get_bc_status_text(self, value, norms_key, gender="male", unit=""):
+        """Получить строку показателя со статусом."""
+        if value is None:
+            return None
+        status = self._get_bc_status(value, norms_key, gender)
+        return f"{value:.1f}{unit} {status}"
+
+    def _build_athlete_bc_report(self, latest, prev, athlete):
+        """Построить сообщение анализа состава тела для спортсмена."""
+        if not latest:
+            return "⚖️ Нет данных для анализа."
+
+        date_s = latest.get("record_date", "?")
+        gender = athlete.get("gender", "male")
+        age_group = athlete.get("age_group", "Pro")
+        self._current_age_group = age_group
+
+        lines = [
+            f"⚖️ *Твой анализ состава тела*",
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"📅 {date_s}\n",
+            f"*📊 Ключевые показатели:*"
+        ]
+
+        # 5 ключевых метрик
+        weight = latest.get("weight_kg")
+        fat = latest.get("body_fat_pct")
+        muscle = latest.get("muscle_mass_kg")
+        water = latest.get("body_water_pct")
+        bmr = latest.get("bmr_kcal")
+
+        if weight is not None:
+            lines.append(f"• Вес: *{weight:.1f}* кг")
+        if fat is not None:
+            fat_status = self._get_bc_status(fat, "body_fat_pct", gender)
+            lines.append(f"• Жир: *{fat:.1f}%* {fat_status}")
+        if muscle is not None:
+            lines.append(f"• Мышцы: *{muscle:.1f}* кг")
+        if water is not None:
+            water_status = self._get_bc_status(water, "body_water_pct", gender)
+            lines.append(f"• Вода: *{water:.0f}%* {water_status}")
+        if bmr is not None:
+            lines.append(f"• Базовый метаболизм: *{bmr}* ккал")
+
+        # Тренд (если есть предыдущий замер)
+        if prev and len(prev) >= 2:
+            # prev[-1] — текущий, prev[0] — самый старый за период
+            older = prev[0]
+            lines.append(f"\n*📈 Изменения за период:*")
+            if weight is not None and older.get("weight_kg") is not None:
+                d = weight - older["weight_kg"]
+                lines.append(f"• Вес: {older['weight_kg']:.1f} → {weight:.1f} ({d:+.1f})")
+            if fat is not None and older.get("body_fat_pct") is not None:
+                d = fat - older["body_fat_pct"]
+                emoji = "✅" if abs(d) <= 2 else ("⚠️" if abs(d) <= 5 else "🚨")
+                lines.append(f"• Жир: {older['body_fat_pct']:.1f}% → {fat:.1f}% ({d:+.1f}%) {emoji}")
+            if muscle is not None and older.get("muscle_mass_kg") is not None:
+                d = muscle - older["muscle_mass_kg"]
+                emoji = "✅" if d >= -0.5 else ("⚠️" if d >= -1.5 else "🚨")
+                lines.append(f"• Мышцы: {older['muscle_mass_kg']:.1f} → {muscle:.1f} ({d:+.1f} кг) {emoji}")
+            if water is not None and older.get("body_water_pct") is not None:
+                d = water - older["body_water_pct"]
+                lines.append(f"• Вода: {older['body_water_pct']:.0f}% → {water:.0f}% ({d:+.0f}%)")
+
+        # Рекомендации
+        recs = []
+        if water is not None and water < 55:
+            recs.append("⚠️ Вода ниже нормы — пей больше воды!\nПей ~2.5-3 л воды в день, особенно перед тренировкой.")
+        if fat is not None:
+            fat_norms = BC_NORMS.get(age_group, BC_NORMS.get("Pro", {})).get(gender, {})
+            fat_high = fat_norms.get("body_fat_pct", (0, 100))[1]
+            if fat > fat_high:
+                recs.append(f"⚠️ Жир выше нормы ({fat_high}%). Снизь калорийность рациона.")
+        if muscle is not None and prev and len(prev) >= 2:
+            older = prev[0]
+            if older.get("muscle_mass_kg") and muscle - older["muscle_mass_kg"] < -1.5:
+                recs.append("🚨 Потеря мышц! Обратись к врачу.")
+
+        if recs:
+            lines.append(f"\n*💡 Рекомендации:*")
+            lines.extend(recs)
+        else:
+            lines.append(f"\n💡 *Всё в порядке! Продолжай в том же духе.*")
+
+        lines.append(f"\n⚠️ _Это не медицинское заключение._")
+        return "\n".join(lines)
+
+    def _build_admin_bc_report(self, latest, prev, athlete):
+        """Построить сообщение для врача (админа) — полный анализ."""
+        if not latest:
+            return "⚖️ Нет данных для анализа."
+
+        date_s = latest.get("record_date", "?")
+        name = athlete.get("full_name", "?")
+        team = athlete.get("team", "?")
+        age_group = athlete.get("age_group", "?")
+        gender = athlete.get("gender", "male")
+        self._current_age_group = age_group
+
+        lines = [
+            f"⚖️ *Новый замер — {name}*",
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"🏀 {team} | {age_group} | {date_s}\n",
+            f"*📊 Состав тела:*"
+        ]
+
+        # Все метрики
+        weight = latest.get("weight_kg")
+        fat = latest.get("body_fat_pct")
+        muscle = latest.get("muscle_mass_kg")
+        water = latest.get("body_water_pct")
+        bone = latest.get("bone_mass_kg")
+        visceral = latest.get("visceral_fat_index")
+        bmr = latest.get("bmr_kcal")
+        amr = latest.get("amr_kcal")
+
+        parts = []
+        if weight is not None:
+            parts.append(f"Вес: *{weight:.1f}* кг")
+        if fat is not None:
+            parts.append(f"Жир: *{fat:.1f}%*")
+        if muscle is not None:
+            parts.append(f"Мышцы: *{muscle:.1f}* кг")
+        if parts:
+            lines.append(" | ".join(parts))
+
+        parts2 = []
+        if water is not None:
+            parts2.append(f"Вода: *{water:.0f}%*")
+        if bone is not None:
+            parts2.append(f"Кости: *{bone:.2f}* кг")
+        if visceral is not None:
+            parts2.append(f"Висц. жир: *{visceral:.0f}*")
+        if parts2:
+            lines.append(" | ".join(parts2))
+
+        parts3 = []
+        if bmr is not None:
+            parts3.append(f"BMR: *{bmr}* ккал")
+        if amr is not None:
+            parts3.append(f"AMR: *{amr}* ккал")
+        if parts3:
+            lines.append(" | ".join(parts3))
+
+        # Тренд
+        if prev and len(prev) >= 2:
+            older = prev[0]
+            lines.append(f"\n*📈 Тренд 2 нед:*")
+            trend_parts = []
+            if weight is not None and older.get("weight_kg") is not None:
+                d = weight - older["weight_kg"]
+                trend_parts.append(f"Вес {d:+.1f}")
+            if fat is not None and older.get("body_fat_pct") is not None:
+                d = fat - older["body_fat_pct"]
+                trend_parts.append(f"жир {d:+.1f}%")
+            if muscle is not None and older.get("muscle_mass_kg") is not None:
+                d = muscle - older["muscle_mass_kg"]
+                trend_parts.append(f"мышцы {d:+.1f}")
+            if trend_parts:
+                lines.append(" | ".join(trend_parts))
+
+        # Красные флаги
+        flags = []
+        if fat is not None and prev and len(prev) >= 2:
+            older = prev[0]
+            if older.get("body_fat_pct"):
+                d = abs(fat - older["body_fat_pct"])
+                if d > BC_RED_FLAGS["fat_change_pct"]:
+                    flags.append(f"⚠️ Жир изменился на {d:.1f}% — возможен артефакт. Перевзвеси!")
+        if muscle is not None and prev and len(prev) >= 2:
+            older = prev[0]
+            if older.get("muscle_mass_kg"):
+                d = muscle - older["muscle_mass_kg"]
+                if d < -BC_RED_FLAGS["muscle_loss_kg"]:
+                    flags.append(f"🚨 Потеря мышц: {d:+.1f} кг!")
+        if water is not None and water < BC_RED_FLAGS["water_critical_pct"]:
+            flags.append(f"⚠️ Критическое обезвоживание: {water:.0f}%!")
+        if visceral is not None and visceral > BC_RED_FLAGS["visceral_risk"]:
+            flags.append(f"🔴 Высокий висцеральный жир: {visceral:.0f}")
+
+        if flags:
+            lines.append(f"\n*🚨 Красные флаги:*")
+            lines.extend(flags)
+
+        lines.append(f"\n_⚠️ GARLYN: жир занижает ~3-4% (Potter+3%)_")
+        return "\n".join(lines)
+
+    def _build_coach_bc_report(self, latest, prev, athlete):
+        """Построить сообщение для тренера — краткая сводка без медицинских деталей."""
+        if not latest:
+            return "⚖️ Нет данных для анализа."
+
+        name = athlete.get("full_name", "?")
+        weight = latest.get("weight_kg")
+        muscle = latest.get("muscle_mass_kg")
+
+        parts = []
+        if weight is not None:
+            parts.append(f"⚖️ *{weight:.1f}* кг")
+        if muscle is not None:
+            parts.append(f"мышцы *{muscle:.1f}* кг")
+
+        trend_parts = []
+        if prev and len(prev) >= 2:
+            older = prev[0]
+            if weight is not None and older.get("weight_kg") is not None:
+                d = weight - older["weight_kg"]
+                trend_parts.append(f"{d:+.1f} кг")
+            if muscle is not None and older.get("muscle_mass_kg") is not None:
+                d = muscle - older["muscle_mass_kg"]
+                trend_parts.append(f"мышцы {d:+.1f}")
+
+        # Определяем статус
+        status = "✅ Норма"
+        if muscle is not None and prev and len(prev) >= 2:
+            older = prev[0]
+            if older.get("muscle_mass_kg") and muscle - older["muscle_mass_kg"] < -1.5:
+                status = "🚨 Внимание!"
+
+        lines = [
+            f"📋 *Замер — {name}*",
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            " | ".join(parts) if parts else "—",
+        ]
+        if trend_parts:
+            lines.append(f"📈 Тренд: {' | '.join(trend_parts)}")
+        lines.append(status)
+        return "\n".join(lines)
+
+    async def _analyze_and_notify_scale(self, update, athlete, records):
+        """Анализ состава тела + уведомления врачу и тренеру после импорта CSV."""
+        aid = athlete["id"]
+
+        # Получаем текущий и предыдущий замер
+        latest = self.db.get_latest_body_composition(aid)
+        all_history = self.db.get_body_composition(aid, days=90)
+
+        if not latest:
+            return
+
+        # --- Текст для спортсмена ---
+        athlete_text = self._build_athlete_bc_report(latest, all_history, athlete)
+        try:
+            await update.message.reply_text(
+                athlete_text, parse_mode="Markdown",
+                reply_markup=self.kb([[(f"🏠 Главное меню", "main_menu")]])
+            )
+        except Exception as e:
+            logger.error(f" Athlete BC report error: {e}")
+
+        # --- Уведомление врачу (админу) ---
+        admin_text = self._build_admin_bc_report(latest, all_history, athlete)
+        try:
+            for admin_id in self._full_access_ids():
+                if admin_id != athlete.get("telegram_id"):
+                    await self._send_admin(admin_id, admin_text)
+        except Exception as e:
+            logger.error(f"Admin BC notify error: {e}")
+
+        # --- Уведомление тренеру ---
+        team = athlete.get("team")
+        if team:
+            coach_text = self._build_coach_bc_report(latest, all_history, athlete)
+            try:
+                coaches = self.db.get_team_coaches(team)
+                full_ids = self._full_access_ids()
+                for cid in coaches:
+                    if cid == athlete.get("telegram_id") or cid in full_ids:
+                        continue
+                    await self._send_admin(cid, coach_text)
+            except Exception as e:
+                logger.error(f"Coach BC notify error: {e}")
+
     async def _ask_height_for_records(self, update, ctx, records):
         """Если у записей нет роста в анкете — просим ввести один раз."""
         # берём первый athlete_id с отсутствующим ростом
@@ -1306,6 +1716,7 @@ class SportHealthBot:
             [(f"📈 Графики", "my_charts")],
             ([] if athlete.get("gender") != "female" else [(f"📅 Мой цикл", "my_cycle")]),
             [(f"⚖️ Обновить вес", "update_weight")],
+            [(f"⚖️ Состав тела", "body_comp_menu")],
             [(f"📋 Анкета / обновить", "questionnaire")],
             [(f"🔙 Назад", "main_menu")]
         ]), parse_mode="Markdown")
@@ -1814,6 +2225,7 @@ class SportHealthBot:
             btns.append([(f"🏥 Рекомендации: {a['full_name']}", f"recs_{a['id']}")])
         btns.append([(f"📊 Сводка за неделю", "coach_week_summary")])
         btns.append([(f"📊 Мой отчёт (Excel)", "report_export_menu")])
+        btns.append([(f"⚖️ Отчёт по весам", "report_body_comp")])
         btns.append([(f"🔙 Главное меню", "main_menu")])
         await q.edit_message_text(text, reply_markup=self.kb(btns))
 
@@ -2398,6 +2810,45 @@ class SportHealthBot:
             await self._send_coach_team_picker(update, tg_id, state["data"]["coach_edit_teams"])
             return
 
+        # Спортсмен: ввод Telegram ID (добавление админом)
+        if step == "admin_add_athlete_tg_id":
+            if user_id not in ADMIN_TELEGRAM_IDS:
+                self.clear_state(user_id)
+                return
+            raw = text.strip().lstrip("@")
+            if not raw.isdigit():
+                await update.message.reply_text(
+                    "❌ Это не похоже на числовой Telegram ID. Пришли число.",
+                    reply_markup=self.kb([[(f"🔙 Управление", "admin_manage")]])
+                )
+                return
+            state["data"]["add_tg_id"] = raw
+            # Переход к выбору команды
+            buttons = [[(team, f"admin_add_team_{team}")] for team in TEAMS]
+            buttons.append([("🔙 Управление", "admin_manage")])
+            await update.message.reply_text(
+                f"✅ Telegram ID: *{raw}*\n\nВыбери *команду:*",
+                reply_markup=self.kb(buttons), parse_mode="Markdown"
+            )
+            return
+
+        # Спортсмен: ввод ФИО (добавление админом)
+        if step == "admin_add_athlete_name":
+            if user_id not in ADMIN_TELEGRAM_IDS:
+                self.clear_state(user_id)
+                return
+            name = re.sub(r'[^\w\s\-]', '', text.strip())
+            if len(name.split()) < 2 or len(name) < 3:
+                await update.message.reply_text(
+                    "❌ Введи *Фамилию Имя* ( minimum 2 слова):",
+                    parse_mode="Markdown"
+                )
+                return
+            name = " ".join(name.split()).title()
+            state["data"]["add_name"] = name
+            await self.admin_add_athlete_save(update, user_id, state)
+            return
+
         # Врач: ввод Telegram ID нового врача
         if step == "admin_doctor_add":
             if user_id not in ADMIN_TELEGRAM_IDS:
@@ -2829,6 +3280,8 @@ class SportHealthBot:
                 await self._watch_brand_instructions(update, ctx, brand)
             elif d == "bc_menu":
                 await self.scale_import_menu(update, ctx)
+            elif d == "bc_overview":
+                await self.bc_overview(update, ctx)
             elif d == "bc_profiles":
                 await self.bc_show_profiles(update, ctx)
             elif d.startswith("bc_page_"):
@@ -2839,6 +3292,10 @@ class SportHealthBot:
                 await self.bc_assign_save(update, ctx)
             elif d.startswith("bc_view_"):
                 await self.bc_view_athlete(update, ctx)
+            elif d == "body_comp_menu":
+                await self.body_comp_menu(update, ctx)
+            elif d == "body_comp_history":
+                await self.body_comp_history(update, ctx)
             elif d == "reset_account":
                 await self.reset_account(update, ctx)
             elif d == "confirm_reset":
@@ -2867,6 +3324,12 @@ class SportHealthBot:
                 await self.show_ban_menu(update, ctx)
             elif d == "admin_manage":
                 await self.show_admin_manage(update, ctx)
+            elif d == "admin_add_athlete":
+                await self.admin_add_athlete_start(update, ctx)
+            elif d.startswith("admin_add_team_"):
+                await self.admin_add_athlete_team(update, ctx)
+            elif d.startswith("admin_add_age_"):
+                await self.admin_add_athlete_age(update, ctx)
             elif d == "daily_report":
                 await self.daily_report(update, ctx)
             elif d == "delete_athlete":
@@ -2892,6 +3355,34 @@ class SportHealthBot:
                 await self.report_choose_period(update, ctx)
             elif d.startswith("report_period_"):
                 await self.generate_xlsx_report(update, ctx)
+            elif d == "report_watches":
+                await self.report_watches_choose_period(update, ctx)
+            elif d.startswith("report_watch_team_"):
+                await self.report_watches_choose_period(update, ctx)
+            elif d.startswith("report_watch_period_"):
+                await self.generate_watch_xlsx_report(update, ctx)
+            elif d == "report_body_comp":
+                await self.report_body_comp_choose_period(update, ctx)
+            elif d.startswith("bc_team_"):
+                # Тренер выбрал команду для отчёта по весам → показать выбор периода
+                team = d.replace("bc_team_", "")
+                state = self.get_state(uid)
+                state["data"]["bc_report_team"] = team
+                buttons = [
+                    [("📅 Последний замер", "report_bc_period_1")],
+                    [("📅 2 недели", "report_bc_period_14")],
+                    [("📅 Месяц", "report_bc_period_30")],
+                    [("📅 3 месяца", "report_bc_period_90")],
+                    [("📅 Всё время", "report_bc_period_999")],
+                    [("🔙 Назад", "report_body_comp")]
+                ]
+                await q.edit_message_text(
+                    f"⚖️ *Отчёт по весам — {team}*\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "Замеры проводятся раз в 2 недели. Выбери период:",
+                    reply_markup=self.kb(buttons), parse_mode="Markdown"
+                )
+            elif d.startswith("report_bc_period_"):
+                await self.generate_bc_xlsx_report(update, ctx)
             elif d == "set_gender":
                 await self.set_gender_menu(update, ctx)
             # === ТРЕНЕР (роль coach) ===
@@ -3905,6 +4396,7 @@ class SportHealthBot:
         )
         buttons = [
             [(f"👥 Список спортсменов", "athlete_list")],
+            [(f"➕ Добавить спортсмена", "admin_add_athlete")],
             [(f"🔒 Блокировка", "ban_menu")],
             [(f"📋 Анкеты", "questionnaire_list")],
             [(f"📅 Отчёт за сегодня", "daily_report")],
@@ -3918,6 +4410,98 @@ class SportHealthBot:
             [(f"🔙 Назад", "main_menu")]
         ]
         await q.edit_message_text(text, reply_markup=self.kb(buttons), parse_mode="Markdown")
+
+    # ==================== ДОБАВЛЕНИЕ СПОРТСМЕНА АДМИНОМ ====================
+
+    async def admin_add_athlete_start(self, update, ctx):
+        """Начать процесс добавления спортсмена — запрос Telegram ID."""
+        q = update.callback_query
+        await q.answer()
+        if not self._is_full_access(q.from_user.id):
+            return
+        state = self.get_state(q.from_user.id)
+        state["step"] = "admin_add_athlete_tg_id"
+        state["data"] = {}
+        await q.edit_message_text(
+            "➕ *Добавить спортсмена*\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Пришли *Telegram ID* спортсмена (число):",
+            reply_markup=self.kb([[(f"🔙 Управление", "admin_manage")]]),
+            parse_mode="Markdown"
+        )
+
+    async def admin_add_athlete_team(self, update, ctx):
+        """Выбор команды для нового спортсмена."""
+        q = update.callback_query
+        await q.answer()
+        team = q.data.replace("admin_add_team_", "")
+        state = self.get_state(q.from_user.id)
+        state["data"]["add_team"] = team
+        buttons = [[(desc, f"admin_add_age_{key}")] for key, desc in AGE_GROUPS.items()]
+        buttons.append([("🔙 Назад", "admin_add_athlete")])
+        await q.edit_message_text(
+            f"➕ *Команда:* {team}\n\nВыбери *возрастную группу:*",
+            reply_markup=self.kb(buttons), parse_mode="Markdown"
+        )
+
+    async def admin_add_athlete_age(self, update, ctx):
+        """Выбор возрастной группы — запрос ФИО."""
+        q = update.callback_query
+        await q.answer()
+        age = q.data.replace("admin_add_age_", "")
+        state = self.get_state(q.from_user.id)
+        state["data"]["add_age_group"] = age
+        state["step"] = "admin_add_athlete_name"
+        await q.edit_message_text(
+            f"➕ *Команда:* {state['data']['add_team']}\n"
+            f"*Группа:* {AGE_GROUPS.get(age, age)}\n\n"
+            f"Введи *Фамилию Имя* спортсмена:",
+            parse_mode="Markdown"
+        )
+
+    async def admin_add_athlete_save(self, update, user_id, state):
+        """Сохранить нового спортсмена в БД."""
+        data = state.get("data", {})
+        tg_id = data.get("add_tg_id")
+        team = data.get("add_team")
+        age_group = data.get("add_age_group")
+        name = data.get("add_name")
+
+        if not all([tg_id, team, age_group, name]):
+            await update.message.reply_text("❌ Ошибка: не все данные заполнены.",
+                reply_markup=self.kb([[(f"🔙 Управление", "admin_manage")]]))
+            return
+
+        # Проверяем, нет ли уже такого telegram_id
+        existing = self.db.get_athlete_by_telegram_id(int(tg_id))
+        if existing:
+            await update.message.reply_text(
+                f"⚠️ Спортсмен с ID {tg_id} уже зарегистрирован:\n"
+                f"👤 {existing['full_name']} | {existing['team']}",
+                reply_markup=self.kb([[(f"🔙 Управление", "admin_manage")]])
+            )
+            return
+
+        ok = self.db.register_athlete(
+            telegram_id=int(tg_id), username=None,
+            full_name=name, age_group=age_group, team=team
+        )
+        if ok:
+            await update.message.reply_text(
+                f"✅ *Спортсмен добавлен!*\n\n"
+                f"👤 {name}\n"
+                f"🏀 Команда: {team}\n"
+                f"📋 Группа: {AGE_GROUPS.get(age_group, age_group)}\n"
+                f"🆔 Telegram ID: {tg_id}\n\n"
+                f"Попроси спортсмена написать /start в боте.",
+                reply_markup=self.kb([[(f"🔙 Управление", "admin_manage")]]),
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Ошибка сохранения. Возможно, этот ID уже есть в базе.",
+                reply_markup=self.kb([[(f"🔙 Управление", "admin_manage")]])
+            )
+        self.clear_state(user_id)
 
     async def admin_complaints_menu(self, update, ctx):
         """Панель жалоб: список спортсменов с жалобами за период."""
@@ -4345,6 +4929,8 @@ class SportHealthBot:
             buttons.append([(f"🏀 {t}", f"report_team_{t}")])
         if is_admin:
             buttons.append([(f"📋 Экспорт анкет", "export_q")])
+            buttons.append([(f"⌚ Отчёт по часам", "report_watches")])
+        buttons.append([(f"⚖️ Отчёт по весам", "report_body_comp")])
         buttons.append([(f"🔙 Назад", "main_menu")])
 
         await q.edit_message_text(
@@ -4401,7 +4987,7 @@ class SportHealthBot:
                 return
         team_filter = None if team == "all" else team
 
-        period_names = {1: "сегодня", 7: "7 дней", 30: "30 дней", 90: "90 дней"}
+        period_names = {1: "последний замер", 14: "2 недели", 30: "месяц", 90: "3 месяца", 999: "всё время"}
 
         wb = Workbook()
 
@@ -4746,6 +5332,790 @@ class SportHealthBot:
             caption=f"📊 Excel-отчёт за {period_names.get(days, f'{days} дн.')} — детализация по дням"
         )
 
+    # ==================== МЕНЮ СОСТАВА ТЕЛА (СПОРТСМЕН) ====================
+
+    async def body_comp_menu(self, update, ctx):
+        """Меню состава тела для спортсмена — последний замер и навигация."""
+        q = update.callback_query
+        await q.answer()
+        athlete = self.db.get_athlete_by_telegram_id(q.from_user.id)
+        if not athlete:
+            return
+        latest = self.db.get_latest_body_composition(athlete["id"])
+        if not latest:
+            await q.edit_message_text(
+                "⚖️ *Состав тела*\n\nУ тебя пока нет данных с весов.\n"
+                "Попроси тренера/врача взвесить тебя на биоимпедансных весах.",
+                reply_markup=self.kb([[(f"🔙 Назад", "view_today")]]),
+                parse_mode="Markdown"
+            )
+            return
+        lines = [
+            f"⚖️ *Состав тела*\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n",
+            f"📅 Последний замер: *{latest.get('record_date')}*\n"
+        ]
+        metrics = [
+            ("Вес", latest.get("weight_kg"), "кг"),
+            ("ИМТ", latest.get("bmi"), ""),
+            ("Жир", latest.get("body_fat_pct"), "%"),
+            ("Мышцы", latest.get("muscle_mass_kg"), "кг"),
+            ("Вода", latest.get("body_water_pct"), "%"),
+            ("Кости", latest.get("bone_mass_kg"), "кг"),
+            ("Висц. жир", latest.get("visceral_fat_index"), ""),
+            ("BMR", latest.get("bmr_kcal"), "ккал"),
+        ]
+        for label, v, unit in metrics:
+            if v is not None:
+                lines.append(f"• {label}: *{float(v):.1f}* {unit}".rstrip())
+        await q.edit_message_text(
+            "\n".join(lines),
+            reply_markup=self.kb([
+                [(f"📜 История (10 замеров)", "body_comp_history")],
+                [(f"📈 Графики", "my_charts")],
+                [(f"🔙 Назад", "view_today")]
+            ]),
+            parse_mode="Markdown"
+        )
+
+    async def body_comp_history(self, update, ctx):
+        """История последних 10 замеров состава тела (для спортсмена)."""
+        q = update.callback_query
+        await q.answer()
+        athlete = self.db.get_athlete_by_telegram_id(q.from_user.id)
+        if not athlete:
+            return
+        history = self.db.get_body_composition(athlete["id"], days=365)
+        if not history:
+            await q.edit_message_text(
+                "📜 *История состава тела*\n\nПока нет данных.",
+                reply_markup=self.kb([[(f"🔙 Назад", "body_comp_menu")]]),
+                parse_mode="Markdown"
+            )
+            return
+        recent = history[:10]
+        lines = [f"📜 *История состава тела* (последние {len(recent)} замеров)\n"]
+        for r in recent:
+            date_s = r.get("record_date", "?")
+            parts = []
+            if r.get("weight_kg") is not None:
+                parts.append(f"вес {r['weight_kg']:.1f}кг")
+            if r.get("body_fat_pct") is not None:
+                parts.append(f"жир {r['body_fat_pct']:.1f}%")
+            if r.get("muscle_mass_kg") is not None:
+                parts.append(f"мышцы {r['muscle_mass_kg']:.1f}кг")
+            if r.get("body_water_pct") is not None:
+                parts.append(f"вода {r['body_water_pct']:.0f}%")
+            if r.get("bone_mass_kg") is not None:
+                parts.append(f"кости {r['bone_mass_kg']:.2f}кг")
+            lines.append(f"📅 {date_s}: " + (", ".join(parts) if parts else "—"))
+        await q.edit_message_text(
+            "\n".join(lines),
+            reply_markup=self.kb([[(f"🔙 Назад", "body_comp_menu")]]),
+            parse_mode="Markdown"
+        )
+
+    # ==================== ОТЧЁТ ПО СОСТАВУ ТЕЛА (EXCEL) ====================
+
+    async def report_body_comp_choose_period(self, update, ctx):
+        """Выбор команды (для тренера) и периода для Excel-отчёта по составу тела."""
+        q = update.callback_query
+        await q.answer()
+        uid = q.from_user.id
+        if not self._is_admin_or_coach(uid):
+            return
+
+        is_admin = self._is_full_access(uid)
+        state = self.get_state(uid)
+
+        if is_admin:
+            # Админ: сразу выбор периода (все команды)
+            state["data"]["bc_report_team"] = "all"
+            buttons = [
+                [("📅 Последний замер", "report_bc_period_1")],
+                [("📅 2 недели", "report_bc_period_14")],
+                [("📅 Месяц", "report_bc_period_30")],
+                [("📅 3 месяца", "report_bc_period_90")],
+                [("📅 Всё время", "report_bc_period_999")],
+                [("🔙 Назад", "report_export_menu")]
+            ]
+            await q.edit_message_text(
+                "⚖️ *Отчёт по весам — выбор периода*\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "Замеры проводятся раз в 2 недели. Выбери период:",
+                reply_markup=self.kb(buttons), parse_mode="Markdown"
+            )
+        else:
+            # Тренер: если одна команда — автовыбор, иначе выбор
+            teams = self._coach_teams(uid) & set(ACTIVE_TEAMS)
+            if len(teams) == 1:
+                team = list(teams)[0]
+                state["data"]["bc_report_team"] = team
+                buttons = [
+                    [("📅 Последний замер", "report_bc_period_1")],
+                    [("📅 2 недели", "report_bc_period_14")],
+                    [("📅 Месяц", "report_bc_period_30")],
+                    [("📅 3 месяца", "report_bc_period_90")],
+                    [("📅 Всё время", "report_bc_period_999")],
+                    [("🔙 Назад", "report_export_menu")]
+                ]
+                await q.edit_message_text(
+                    f"⚖️ *Отчёт по весам — {team}*\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "Замеры проводятся раз в 2 недели. Выбери период:",
+                    reply_markup=self.kb(buttons), parse_mode="Markdown"
+                )
+            else:
+                buttons = []
+                for t in sorted(teams):
+                    buttons.append([(f"🏀 {t}", f"bc_team_{t}")])
+                buttons.append([("🔙 Назад", "report_export_menu")])
+                await q.edit_message_text(
+                    "⚖️ *Отчёт по весам — выбор команды*\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "Выбери команду:",
+                    reply_markup=self.kb(buttons), parse_mode="Markdown"
+                )
+
+    async def generate_bc_xlsx_report(self, update, ctx):
+        """Генерация Excel-отчёта по данным биоимпедансных весов (состав тела)."""
+        q = update.callback_query
+        await q.answer()
+        uid = q.from_user.id
+        if not self._is_admin_or_coach(uid):
+            return
+
+        days = int(q.data.replace("report_bc_period_", ""))
+        state = self.get_state(uid)
+        # Если был выбор команды — используем (report_body_comp可以选择所有或 конкретную)
+        team = state.get("data", {}).get("bc_report_team", "all")
+        if not self._is_full_access(uid):
+            if team == "all" or team not in self._coach_teams(uid):
+                await q.edit_message_text("🔒 Нет доступа к этой команде.",
+                                           reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]]))
+                return
+        team_filter = None if team == "all" else team
+
+        period_names = {1: "последний замер", 14: "2 недели", 30: "месяц", 90: "3 месяца", 999: "всё время"}
+
+        wb = Workbook()
+
+        # ---- Стили (те же что в generate_xlsx_report) ----
+        hf = Font(bold=True, size=11, color="FFFFFF")
+        hfl = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        hdr_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        thin_border = Border(
+            left=Side(style="thin"), right=Side(style="thin"),
+            top=Side(style="thin"), bottom=Side(style="thin")
+        )
+        title_font = Font(bold=True, size=14, color="1F4E79")
+        subtitle_font = Font(bold=True, size=10, color="808080")
+        bold_font = Font(bold=True, size=10)
+        normal_font = Font(size=10)
+        center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        gray_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+
+        def cell(ws, row, col, value, font=None, fill=None, align=None, border=thin_border):
+            c = ws.cell(row=row, column=col, value=value)
+            if font: c.font = font
+            if fill is not None: c.fill = fill
+            if align: c.alignment = align
+            if border: c.border = border
+            return c
+
+        # ---- Получаем данные ----
+        rows = self.db.get_bc_period(days, team_filter)
+        if team_filter is None:
+            _active = set(ACTIVE_TEAMS)
+            rows = [r for r in rows if r.get("team") in _active]
+
+        if not rows:
+            await q.edit_message_text("❌ Нет данных состава тела за выбранный период.",
+                                       reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]]))
+            return
+
+        # Группируем по командам
+        by_team = {}
+        for r in rows:
+            t = r.get("team", "?")
+            by_team.setdefault(t, []).append(r)
+
+        all_teams = sorted(by_team.keys())
+
+        # ---- Лист «Сводка» ----
+        ws0 = wb.active
+        ws0.title = "Сводка"
+        ws0.merge_cells("A1:E1")
+        cell(ws0, 1, 1, "⚖️ ЧБК — ОТЧЁТ ПО СОСТАВУ ТЕЛА", font=title_font, border=None)
+        ws0.merge_cells("A2:E2")
+        cell(ws0, 2, 1,
+             f"Период: {period_names.get(days, f'{days} дн.')} | Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+             font=subtitle_font, border=None)
+
+        r = 4
+        sum_headers = ["Команда", "Спортсменов", "Ср. вес (кг)", "Ср. жир (%)", "Ср. мышцы (кг)"]
+        for ci, h in enumerate(sum_headers, 1):
+            cell(ws0, r, ci, h, font=hf, fill=hfl, align=hdr_align)
+        r += 1
+
+        for t in all_teams:
+            team_rows = by_team[t]
+            # Последний замер каждого спортсмена — для средних
+            latest_by_athlete = {}
+            for row in team_rows:
+                aid = row.get("athlete_id")
+                if aid not in latest_by_athlete:
+                    latest_by_athlete[aid] = row
+            n_athletes = len(latest_by_athlete)
+            weights = [v["weight_kg"] for v in latest_by_athlete.values()
+                       if v.get("weight_kg") is not None]
+            fats = [v["body_fat_pct"] for v in latest_by_athlete.values()
+                    if v.get("body_fat_pct") is not None]
+            muscles = [v["muscle_mass_kg"] for v in latest_by_athlete.values()
+                       if v.get("muscle_mass_kg") is not None]
+            avg_w = sum(weights) / len(weights) if weights else 0
+            avg_f = sum(fats) / len(fats) if fats else 0
+            avg_m = sum(muscles) / len(muscles) if muscles else 0
+
+            cell(ws0, r, 1, t, font=bold_font)
+            cell(ws0, r, 2, n_athletes, align=center)
+            cell(ws0, r, 3, f"{avg_w:.1f}" if weights else "—", align=center)
+            cell(ws0, r, 4, f"{avg_f:.1f}" if fats else "—", align=center)
+            cell(ws0, r, 5, f"{avg_m:.1f}" if muscles else "—", align=center)
+            r += 1
+
+        # Итоговая строка
+        total_ath = sum(
+            len({row["athlete_id"] for row in by_team[t]
+                 if row.get("athlete_id")})
+            for t in all_teams
+        )
+        cell(ws0, r, 1, "ИТОГО", font=Font(bold=True, size=11))
+        cell(ws0, r, 2, total_ath, font=bold_font, align=center)
+        for ci in range(3, 6):
+            cell(ws0, r, ci, "—", align=center)
+        r += 1
+
+        self._add_logo_to_ws(ws0, anchor="G3", size=90)
+
+        for ci in range(1, 6):
+            ws0.column_dimensions[chr(64 + ci)].width = 18
+
+        # ---- Листы по командам: матрица (игрок × дата, подстолбцы=метрики) ----
+        bc_metrics = ["Вес", "% Жира", "Мышцы", "Вода", "BMR"]
+        metric_cols = ["weight_kg", "body_fat_pct", "muscle_mass_kg", "body_water_pct", "bmr_kcal"]
+
+        for t in all_teams:
+            team_rows = by_team[t]
+            ws = wb.create_sheet(title=t[:31])
+            ws.merge_cells("A1:L1")
+            cell(ws, 1, 1, f"⚖️ Состав тела — {t}", font=title_font, border=None)
+            r = 2
+            ws.merge_cells(f"A{r}:L{r}")
+            cell(ws, r, 1,
+                 f"Период: {period_names.get(days, f'{days} дн.')} | "
+                 f"Дата отчёта: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+                 font=subtitle_font, border=None)
+            r = 4
+
+            # Собираем данные: игрок → {дата → row}
+            athlete_days = {}
+            all_dates = []
+            for row in team_rows:
+                name = row.get("full_name", "?")
+                d = str(row.get("record_date", ""))
+                athlete_days.setdefault(name, {})[d] = row
+                if d not in all_dates:
+                    all_dates.append(d)
+            all_dates.sort()
+
+            # Двухуровневая шапка: строка дат (SR_DATE), строка метрик (SR_METR)
+            SR_DATE = r
+            SR_METR = r + 1
+            ws.merge_cells(start_row=SR_DATE, start_column=1, end_row=SR_METR, end_column=1)
+            cell(ws, SR_DATE, 1, "Игрок", font=hf, fill=hfl, align=hdr_align)
+            col = 2
+            for dt in all_dates:
+                ws.merge_cells(start_row=SR_DATE, start_column=col,
+                               end_row=SR_DATE, end_column=col + len(bc_metrics) - 1)
+                cell(ws, SR_DATE, col, dt, font=hf, fill=hfl, align=hdr_align)
+                for k, m in enumerate(bc_metrics):
+                    cell(ws, SR_METR, col + k, m,
+                         font=Font(bold=True, size=8, color="FFFFFF"),
+                         fill=hfl, align=hdr_align)
+                col += len(bc_metrics)
+            ws.merge_cells(start_row=SR_DATE, start_column=col,
+                           end_row=SR_METR, end_column=col)
+            cell(ws, SR_DATE, col, "Ср.", font=hf, fill=hfl, align=hdr_align)
+            SRCOL = col
+            r = SR_METR + 1
+
+            ws.freeze_panes = f"B{r}"
+
+            if not athlete_days:
+                ws.merge_cells(start_row=r, start_column=1,
+                               end_row=r, end_column=SRCOL)
+                cell(ws, r, 1, "Нет данных за данный период.",
+                     font=Font(italic=True, color="808080"), border=None)
+                r += 1
+            else:
+                for name in sorted(athlete_days.keys()):
+                    daysmap = athlete_days[name]
+                    col = 2
+                    avg_vals = {mc: [] for mc in metric_cols}
+                    for dt in all_dates:
+                        row_data = daysmap.get(dt)
+                        if row_data is None:
+                            for k in range(len(bc_metrics)):
+                                c = ws.cell(row=r, column=col + k, value="")
+                                c.border = thin_border
+                                c.fill = gray_fill
+                            col += len(bc_metrics)
+                            continue
+                        for k, mc in enumerate(metric_cols):
+                            v = row_data.get(mc)
+                            if v is not None:
+                                v = float(v)
+                                avg_vals[mc].append(v)
+                                cell(ws, r, col + k, round(v, 1), align=center)
+                            else:
+                                cell(ws, r, col + k, "", align=center)
+                        col += len(bc_metrics)
+                    # Средние в колонке «Ср.»
+                    avgs = []
+                    for mc in metric_cols:
+                        if avg_vals[mc]:
+                            avgs.append(f"{sum(avg_vals[mc]) / len(avg_vals[mc]):.1f}")
+                        else:
+                            avgs.append("—")
+                    cell(ws, r, SRCOL, ", ".join(avgs),
+                         align=center, font=bold_font)
+                    cell(ws, r, 1, name, font=bold_font)
+                    r += 1
+
+            # Ширина колонок
+            ws.column_dimensions["A"].width = 22
+            for ci in range(2, min(SRCOL + 2, 60)):
+                cl = get_column_letter(ci)
+                if ws.column_dimensions[cl].width < 5.2:
+                    ws.column_dimensions[cl].width = 5.2
+            ws.column_dimensions[get_column_letter(SRCOL)].width = 22
+
+        # ---- Лист «Легенда» ----
+        ws_leg = wb.create_sheet("Легенда")
+        ws_leg.column_dimensions["A"].width = 28
+        ws_leg.column_dimensions["B"].width = 95
+        _lr = 1
+        _c = ws_leg.cell(_lr, 1, "ЧТО ЗНАЧИТ КАЖДЫЙ ПОКАЗАТЕЛЬ (СОСТАВ ТЕЛА)")
+        _c.font = Font(bold=True, size=13, color="1F4E79"); _lr += 1
+        _c = ws_leg.cell(_lr, 1, "Расшифровка показателей биоимпедансного анализа (GARLYN Bodyscan Master).")
+        _c.font = Font(size=9, italic=True, color="808080"); _lr += 1
+        _c = ws_leg.cell(_lr, 1, "⚠️ Данные скорректированы +3% к % жира (Potter et al., 2021) для приближения к DXA.")
+        _c.font = Font(size=9, italic=True, color="CC6600"); _lr += 2
+        legend_rows = [
+            ("ВЕС (кг)", "Масса тела в килограммах. Контроль динамики (рост/снижение) важен для планирования нагрузки."),
+            ("% ЖИРА (body fat %)", "Процент жировой ткани. Норма для юных спортсменов: 10-18% (м), 18-26% (ж). Скорректировано +3% (Potter et al., 2021). GARLYN систематически занижает жир на ~3-4% относительно DXA."),
+            ("МЫШЕЧНАЯ МАССА (кг)", "Суммарная масса скелетных мышц. Рост = прогресс силы. Снижение при перегрузке/болезни."),
+            ("ВОДА (body water %)", "Общий объём воды в теле. Норма: 55-65% (м), 50-60% (ж). Снижение <55% = обезвоживание (риск травм, снижение восстановления)."),
+            ("BMR (ккал)", "Базовый метаболизм — количество калорий, которые организм тратит в покое. Рассчитан из безжировой массы. Для баскетболистов 15-18: ~1600-2200 ккал."),
+            ("КОСТИ (bone mass кг)", "Минеральная плотность костей. Стабильна у молодых; резкое снижение — красный флаг. Норма Ca: 1300 мг/сут + витамин D 600-1000 МЕ."),
+            ("ВИСЦЕРАЛЬНЫЙ ЖИР", "Жир вокруг органов (индекс 1-12). ≤4 — норма, 5-9 — повышен, ≥10 — высокий риск метаболических нарушений."),
+            ("ПОДКОЖНЫЙ ЖИР (%)", "Процент подкожного жира. Коррелирует с общим % жира, но не заменяет его."),
+            ("БЕЗЖИРОВАЯ МАССА (кг)", "Fat-free mass (FFM) = вес - жир. Включает мышцы, кости, воду, органы."),
+            ("БЕЛОК (%)", "Процент белка в теле. Белок — строительный материал для мышц. Норма: 16-20%."),
+            ("AMR (ккал)", "Активный метаболизм = BMR × коэффициент активности. Для баскетболистов: ~2800-3500 ккал."),
+        ]
+        for _col1, _col2 in legend_rows:
+            _c = ws_leg.cell(_lr, 1, _col1); _c.font = Font(bold=True, size=10)
+            _c = ws_leg.cell(_lr, 2, _col2)
+            _c.font = Font(size=10)
+            _c.alignment = Alignment(wrap_text=True, vertical="top")
+            _lr += 1
+
+        _lr += 1
+        _c = ws_leg.cell(_lr, 1, "ЦВЕТОВОЕ КОДИРОВАНИЕ")
+        _c.font = Font(bold=True, size=11, color="1F4E79"); _lr += 1
+        color_legend = [
+            ("🟢 Зелёный", "Показатель в пределах нормы для возраста и пола"),
+            ("🟡 Жёлтый", "Пограничное значение — стоит обратить внимание"),
+            ("🔴 Красный", "Отклонение от нормы — требуется консультация врача"),
+        ]
+        for _col1, _col2 in color_legend:
+            _c = ws_leg.cell(_lr, 1, _col1); _c.font = Font(bold=True, size=10)
+            _c = ws_leg.cell(_lr, 2, _col2)
+            _c.font = Font(size=10)
+            _lr += 1
+
+        _lr += 1
+        _c = ws_leg.cell(_lr, 1, "ИСТОЧНИКИ")
+        _c.font = Font(bold=True, size=11, color="1F4E79"); _lr += 1
+        sources = [
+            "1. Looney DP et al. (2024) Reliability, biological variability, and accuracy of MF-BIA. Frontiers in Nutrition, 11:1491931",
+            "2. Dupertuis YM et al. (2025) BIA instruments: how do they differ. Curr Opin Clin Nutr Metab Care, 28(5):379-387",
+            "3. Iblasi R et al. (2025) Pre-season and in-season body composition by BIA in football. Frontiers in Nutrition, 12:1657855",
+            "4. Potter AW et al. (2021) +3% body fat correction for BIA vs DXA",
+            "5. ESPEN guidelines for BIA measurement standardization (Dupertuis et al., 2025)",
+        ]
+        for src in sources:
+            _c = ws_leg.cell(_lr, 1, src)
+            _c.font = Font(size=9, color="666666")
+            ws_leg.merge_cells(start_row=_lr, start_column=1, end_row=_lr, end_column=2)
+            _lr += 1
+
+        # ---- Сохраняем и отправляем ----
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        await q.message.reply_document(
+            document=output,
+            filename=f"bc_report_{date.today().strftime('%Y%m%d')}.xlsx",
+            caption=f"⚖️ Excel-отчёт по составу тела за {period_names.get(days, f'{days} дн.')}"
+        )
+
+    # ==================== ОТЧЁТ ПО УМНЫМ ЧАСАМ (EXCEL) ====================
+
+    async def report_watches_choose_period(self, update, ctx):
+        """Выбор периода для отчёта по данным умных часов."""
+        q = update.callback_query
+        await q.answer()
+        uid = q.from_user.id
+        if not self._is_admin_or_coach(uid):
+            return
+
+        d = q.data
+        state = self.get_state(uid)
+
+        if d == "report_watches":
+            # Напрямую из меню отчётов — показываем выбор команды
+            is_admin = self._is_full_access(uid)
+            if is_admin:
+                teams = set(ACTIVE_TEAMS) & set(a["team"] for a in self.db.get_all_athletes() if a.get("team"))
+            else:
+                teams = self._coach_teams(uid) & set(ACTIVE_TEAMS)
+
+            buttons = []
+            if is_admin:
+                buttons.append([("👥 Все команды", "report_watch_team_all")])
+            for t in sorted(teams):
+                buttons.append([(f"🏀 {t}", f"report_watch_team_{t}")])
+            buttons.append([("🔙 Назад", "report_export_menu")])
+
+            await q.edit_message_text(
+                "⌚ *Отчёт по часам — выбор команды*\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\nВыбери команду:",
+                reply_markup=self.kb(buttons), parse_mode="Markdown"
+            )
+            return
+
+        if d.startswith("report_watch_team_"):
+            team = d.replace("report_watch_team_", "")
+            if not self._is_full_access(uid):
+                if team != "all" and team not in self._coach_teams(uid):
+                    await q.edit_message_text("🔒 Нет доступа к этой команде.",
+                                               reply_markup=self.kb([[(f"🔙 Назад", "report_export_menu")]]))
+                    return
+            state["data"]["watch_report_team"] = team
+
+            buttons = [
+                [("📅 Последние 7 дней", "report_watch_period_7")],
+                [("📅 Последние 30 дней", "report_watch_period_30")],
+                [("📅 Последние 90 дней", "report_watch_period_90")],
+                [("🔙 Назад", "report_watches")]
+            ]
+            display_team = "Все команды" if team == "all" else team
+            await q.edit_message_text(
+                f"⌚ *Отчёт по часам*\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Команда: *{display_team}*\n\nЗа какой период выгрузить данные?",
+                reply_markup=self.kb(buttons), parse_mode="Markdown"
+            )
+
+    async def generate_watch_xlsx_report(self, update, ctx):
+        """Генерация Excel-отчёта по данным умных часов."""
+        q = update.callback_query
+        await q.answer()
+        uid = q.from_user.id
+        if not self._is_admin_or_coach(uid):
+            return
+
+        days = int(q.data.replace("report_watch_period_", ""))
+        state = self.get_state(uid)
+        team = state.get("data", {}).get("watch_report_team", "all")
+        if not self._is_full_access(uid):
+            if team == "all" or team not in self._coach_teams(uid):
+                await q.edit_message_text("🔒 Нет доступа к этой команде.",
+                                           reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]]))
+                return
+        team_filter = None if team == "all" else team
+
+        period_names = {7: "7 дней", 30: "30 дней", 90: "90 дней"}
+
+        # ---- Получаем данные ----
+        watch_rows = self.db.get_watch_data_period(days, team_filter)
+        if team_filter is None:
+            _active = set(ACTIVE_TEAMS)
+            watch_rows = [r for r in watch_rows if r.get("team") in _active]
+
+        if not watch_rows:
+            await q.edit_message_text("❌ Нет данных часов за выбранный период.",
+                                       reply_markup=self.kb([[(f"🔙 Назад", "report_watches")]]))
+            return
+
+        # Группируем по командам
+        rows_by_team = {}
+        for row in watch_rows:
+            t = row.get("team", "?")
+            rows_by_team.setdefault(t, []).append(row)
+
+        all_teams = sorted(rows_by_team.keys())
+
+        # ---- Стилы (как в generate_xlsx_report) ----
+        wb = Workbook()
+        hf = Font(bold=True, size=11, color="FFFFFF")
+        hfl = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        hdr_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        thin_border = Border(
+            left=Side(style="thin"), right=Side(style="thin"),
+            top=Side(style="thin"), bottom=Side(style="thin")
+        )
+        gray_fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+        title_font = Font(bold=True, size=14, color="1F4E79")
+        subtitle_font = Font(bold=True, size=10, color="808080")
+        bold_font = Font(bold=True, size=10)
+        normal_font = Font(size=10)
+        center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+        def cell(ws, row, col, value, font=None, fill=None, align=None, border=thin_border):
+            c = ws.cell(row=row, column=col, value=value)
+            if font: c.font = font
+            if fill is not None: c.fill = fill
+            if align: c.alignment = align
+            if border: c.border = border
+            return c
+
+        # ---- ЛИСТ СВОДКА ----
+        ws0 = wb.active
+        ws0.title = "Сводка"
+        ws0.merge_cells("A1:F1")
+        cell(ws0, 1, 1, "⌚ ЧБК — СВОДНЫЙ ОТЧЁТ ПО ЧАСАМ", font=title_font, border=None)
+        ws0.merge_cells("A2:F2")
+        cell(ws0, 2, 1, f"Период: {period_names.get(days, f'{days} дн.')} | Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+             font=subtitle_font, border=None)
+
+        r = 4
+        sum_headers = ["Команда", "Спортсменов", "Ср. пульс", "Ср. сон (ч)", "Ср. шаги", "Записей"]
+        for ci, h in enumerate(sum_headers, 1):
+            cell(ws0, r, ci, h, font=hf, fill=hfl, align=hdr_align)
+        r += 1
+
+        for t in all_teams:
+            rows = rows_by_team.get(t, [])
+            n_athletes = len(set(row["athlete_id"] for row in rows))
+            hr_vals = [row["resting_hr"] for row in rows if row.get("resting_hr") is not None]
+            sleep_vals = [row["sleep_hours"] for row in rows if row.get("sleep_hours") is not None]
+            steps_vals = [row["steps"] for row in rows if row.get("steps") is not None]
+
+            avg_hr = round(sum(hr_vals) / len(hr_vals)) if hr_vals else None
+            avg_sleep = round(sum(sleep_vals) / len(sleep_vals), 1) if sleep_vals else None
+            avg_steps = round(sum(steps_vals) / len(steps_vals)) if steps_vals else None
+
+            cell(ws0, r, 1, t, font=bold_font)
+            cell(ws0, r, 2, n_athletes, align=center)
+            cell(ws0, r, 3, avg_hr if avg_hr else "—", align=center)
+            cell(ws0, r, 4, avg_sleep if avg_sleep else "—", align=center)
+            cell(ws0, r, 5, avg_steps if avg_steps else "—", align=center)
+            cell(ws0, r, 6, len(rows), align=center)
+            r += 1
+
+        # Итого
+        cell(ws0, r, 1, "ИТОГО", font=Font(bold=True, size=11))
+        cell(ws0, r, 2, sum(len(set(row["athlete_id"] for row in rows_by_team.get(t, []))) for t in all_teams), font=bold_font, align=center)
+        cell(ws0, r, 6, len(watch_rows), font=bold_font, align=center)
+        for ci in range(3, 6):
+            cell(ws0, r, ci, "—", align=center)
+        r += 1
+
+        self._add_logo_to_ws(ws0, anchor="H3", size=90)
+
+        for ci in range(1, 7):
+            ws0.column_dimensions[chr(64 + ci)].width = 18
+
+        # ---- ЛИСТЫ ПО КОМАНДАМ: матрица Игрок-День-Показатели ----
+        from openpyxl.utils import get_column_letter as _gcl
+
+        metrics = ["Пульс", "Сон", "Шаги", "Стресс", "SpO2", "HRV"]
+        metric_keys = ["resting_hr", "sleep_hours", "steps", "stress", "spo2", "hrv"]
+
+        for t in all_teams:
+            rows = rows_by_team.get(t, [])
+            ws = wb.create_sheet(title=t[:31])
+
+            r = 1
+            ws.merge_cells("A1:N1")
+            cell(ws, r, 1, f"⌚ ЧБК — Данные часов: {t}", font=title_font, border=None)
+            r += 1
+            ws.merge_cells(f"A{r}:N{r}")
+            cell(ws, r, 1,
+                 f"Период: {period_names.get(days, f'{days} дн.')} | Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')} | Записей: {len(rows)}",
+                 font=subtitle_font, border=None)
+            r += 1
+
+            # Собираем по игроку: athlete_id -> {date_str: row}
+            athlete_map = {}
+            all_dates = []
+            for row in rows:
+                aid = row["athlete_id"]
+                ds = str(row.get("record_date", ""))
+                athlete_map.setdefault(aid, {"name": row.get("full_name", "?"), "days": {}})
+                athlete_map[aid]["days"][ds] = row
+                if ds not in all_dates:
+                    all_dates.append(ds)
+            all_dates.sort()
+
+            # Двухуровневая шапка: даты (объединённые) + метрики под каждой датой
+            SR_DATE = r
+            SR_METR = r + 1
+
+            # Игрок — объединён
+            ws.merge_cells(start_row=SR_DATE, start_column=1, end_row=SR_METR, end_column=1)
+            cell(ws, SR_DATE, 1, "Игрок", font=hf, fill=hfl, align=hdr_align)
+
+            col = 2
+            date_start_cols = {}
+            for di, dt in enumerate(all_dates):
+                try:
+                    dt_short = dt[5:10].replace("-", ".")  # MM.DD
+                except Exception:
+                    dt_short = dt
+                date_start_cols[dt] = col
+                ws.merge_cells(start_row=SR_DATE, start_column=col,
+                               end_row=SR_DATE, end_column=col + len(metrics) - 1)
+                cell(ws, SR_DATE, col, dt_short, font=Font(bold=True, size=9, color="FFFFFF"),
+                     fill=PatternFill(start_color="5B9BD5", end_color="5B9BD5", fill_type="solid"),
+                     align=hdr_align)
+                for mi, mname in enumerate(metrics):
+                    cell(ws, SR_METR, col + mi, mname, font=Font(bold=True, size=8, color="FFFFFF"),
+                         fill=PatternFill(start_color="9DC3E6", end_color="9DC3E6", fill_type="solid"),
+                         align=hdr_align)
+                col += len(metrics)
+
+            # Средняя по игроку
+            ws.merge_cells(start_row=SR_DATE, start_column=col,
+                           end_row=SR_DATE, end_column=col + len(metrics) - 1)
+            cell(ws, SR_DATE, col, "Ср.", font=Font(bold=True, size=9, color="FFFFFF"),
+                 fill=PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid"),
+                 align=hdr_align)
+            for mi, mname in enumerate(metrics):
+                cell(ws, SR_METR, col + mi, mname, font=Font(bold=True, size=8, color="FFFFFF"),
+                     fill=PatternFill(start_color="8EAADB", end_color="8EAADB", fill_type="solid"),
+                     align=hdr_align)
+            avg_col = col
+            col += len(metrics)
+
+            r = SR_METR + 1
+
+            # Строки игроков
+            zebra = False
+            for aid in sorted(athlete_map.keys(), key=lambda x: athlete_map[x]["name"]):
+                info = athlete_map[aid]
+                row_fill = PatternFill(start_color="F7F9FC", end_color="F7F9FC", fill_type="solid") if zebra else None
+                cell(ws, r, 1, info["name"], font=Font(bold=True, size=10), fill=row_fill)
+
+                sums = {mk: [] for mk in metric_keys}
+                for dt in all_dates:
+                    base_col = date_start_cols[dt]
+                    drow = info["days"].get(dt)
+                    for mi, mk in enumerate(metric_keys):
+                        val = drow.get(mk) if drow else None
+                        c = ws.cell(row=r, column=base_col + mi, value=val)
+                        c.border = thin_border
+                        c.alignment = center
+                        c.font = normal_font
+                        if row_fill:
+                            c.fill = row_fill
+                        if val is not None:
+                            sums[mk].append(float(val))
+                            # Цветовая индикация для пульса
+                            if mk == "resting_hr":
+                                if val > 70:
+                                    c.fill = PatternFill(start_color="F8D7DA", end_color="F8D7DA", fill_type="solid")
+                                elif val > 60:
+                                    c.fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+                                else:
+                                    c.fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+                            elif mk == "stress" and val is not None:
+                                if val > 50:
+                                    c.fill = PatternFill(start_color="F8D7DA", end_color="F8D7DA", fill_type="solid")
+                                elif val > 30:
+                                    c.fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+                                else:
+                                    c.fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+                            elif mk == "spo2" and val is not None:
+                                if val < 95:
+                                    c.fill = PatternFill(start_color="F8D7DA", end_color="F8D7DA", fill_type="solid")
+                                elif val < 97:
+                                    c.fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+                                else:
+                                    c.fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+
+                # Средние значения
+                for mi, mk in enumerate(metric_keys):
+                    avg_val = round(sum(sums[mk]) / len(sums[mk]), 1) if sums[mk] else None
+                    c = ws.cell(row=r, column=avg_col + mi, value=avg_val)
+                    c.border = thin_border
+                    c.alignment = center
+                    c.font = Font(bold=True, size=10)
+                    if row_fill:
+                        c.fill = row_fill
+
+                # Граница правее средних
+                cell(ws, r, avg_col + len(metrics), "", border=thin_border, fill=row_fill)
+
+                r += 1
+                zebra = not zebra
+
+            # Ширины колонок
+            ws.column_dimensions["A"].width = 22
+            for ci in range(2, col + 1):
+                cl = _gcl(ci)
+                if ws.column_dimensions[cl].width < 8:
+                    ws.column_dimensions[cl].width = 8
+
+            self._add_logo_to_ws(ws, anchor=f"{_gcl(col + 2)}{SR_DATE}", size=80)
+
+        # ---- Лист «Легенда» ----
+        ws_leg = wb.create_sheet("Легенда")
+        ws_leg.column_dimensions["A"].width = 28
+        ws_leg.column_dimensions["B"].width = 95
+        lr = 1
+        c = ws_leg.cell(lr, 1, "ПОКАЗАТЕЛИ УМНЫХ ЧАСОВ")
+        c.font = Font(bold=True, size=13, color="1F4E79"); lr += 1
+        c = ws_leg.cell(lr, 1, "Расшифровка показателей в отчёте по часам.")
+        c.font = Font(size=9, italic=True, color="808080"); lr += 2
+        legend_rows = [
+            ("ПУЛЬС ПОКОЯ (RHR)", "Уд/мин, измеряется утром. Чем ниже — тем тренированнее. Рост на 5-10 к норме = перегрузка/болезнь. >70 — внимание, >80 — риск."),
+            ("СОН (ч)", "Продолжительность сна в часах. Норма 7-9 ч. Менее 6 ч — недосып, снижение восстановления."),
+            ("ШАГИ", "Количество шагов за день. Норма для спортсмена >8000. Менее 5000 — малоподвижный день."),
+            ("СТРЕСС", "Уровень стресса по данным часов (0-100). >50 — высокий, 30-50 — повышенный, <30 — норма."),
+            ("SpO2", "Насыщение крови кислородом (%). Норма 97-100. Менее 95 — пониженное, нужен контроль."),
+            ("HRV", "Вариабельность сердечного ритма (мс). Чем выше — тем лучше восстановление."),
+        ]
+        for col1, col2 in legend_rows:
+            c = ws_leg.cell(lr, 1, col1); c.font = Font(bold=True, size=10)
+            c = ws_leg.cell(lr, 2, col2); c.font = Font(size=10); c.alignment = Alignment(wrap_text=True, vertical="top")
+            lr += 1
+        lr += 1
+        c = ws_leg.cell(lr, 1, "ЦВЕТА"); c.font = Font(bold=True, size=11); lr += 1
+        for col_val, lab in [("E2EFDA", "Зелёный — норма"), ("FFF2CC", "Жёлтый — внимание"),
+                             ("F8D7DA", "Красный — критично")]:
+            c = ws_leg.cell(lr, 1, "●")
+            c.fill = PatternFill(start_color=col_val, end_color=col_val, fill_type="solid")
+            c.font = Font(bold=True, size=10)
+            c = ws_leg.cell(lr, 2, lab); c.font = Font(size=10)
+            lr += 1
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        await q.message.reply_document(
+            document=output,
+            filename=f"watch_report_{date.today().strftime('%Y%m%d')}.xlsx",
+            caption=f"⌚ Excel-отчёт по часам за {period_names.get(days, f'{days} дн.')}"
+        )
 
     def _xl_score_fill(self, val):
         """Возврат заливки по шкале 1-7 (7=отлично). None для пустых."""

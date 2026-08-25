@@ -471,6 +471,7 @@ class Database:
                        dw.sleep_score, dw.stress_score, dw.fatigue_score,
                        dw.muscle_soreness, dw.mood_score, dw.resting_hr,
                        dw.hrv_ms, dw.had_training, dw.sRPE_score,
+                       dw.pain_nrs, dw.readiness, dw.sleep_hours,
                        dw.cycle_day, dw.cycle_phase, dw.complaints
                 FROM daily_wellness dw
                 JOIN athletes a ON a.id = dw.athlete_id
@@ -485,6 +486,7 @@ class Database:
                        dw.sleep_score, dw.stress_score, dw.fatigue_score,
                        dw.muscle_soreness, dw.mood_score, dw.resting_hr,
                        dw.hrv_ms, dw.had_training, dw.sRPE_score,
+                       dw.pain_nrs, dw.readiness, dw.sleep_hours,
                        dw.cycle_day, dw.cycle_phase, dw.complaints
                 FROM daily_wellness dw
                 JOIN athletes a ON a.id = dw.athlete_id
@@ -1215,6 +1217,30 @@ class Database:
             logger.error(f"save_watch_data: {e}")
             return False
 
+    def get_watch_data_period(self, days: int = 7, team: str = None) -> List[Dict]:
+        """Получить данные часов за период (для Excel-отчёта)."""
+        if team:
+            rows = self.conn.execute("""
+                SELECT a.full_name, a.team, a.age_group, a.id as athlete_id,
+                       wd.record_date, wd.resting_hr, wd.heart_rate, wd.sleep_hours,
+                       wd.steps, wd.stress, wd.spo2, wd.hrv, wd.weight
+                FROM watch_data wd
+                JOIN athletes a ON a.id = wd.athlete_id
+                WHERE wd.record_date >= date('now', '-' || ? || ' days') AND a.team = ?
+                ORDER BY a.full_name, wd.record_date DESC
+            """, (days, team)).fetchall()
+        else:
+            rows = self.conn.execute("""
+                SELECT a.full_name, a.team, a.age_group, a.id as athlete_id,
+                       wd.record_date, wd.resting_hr, wd.heart_rate, wd.sleep_hours,
+                       wd.steps, wd.stress, wd.spo2, wd.hrv, wd.weight
+                FROM watch_data wd
+                JOIN athletes a ON a.id = wd.athlete_id
+                WHERE wd.record_date >= date('now', '-' || ? || ' days')
+                ORDER BY a.full_name, wd.record_date DESC
+            """, (days,)).fetchall()
+        return [dict(r) for r in rows]
+
     # ============ БИОИМПЕДАНСНЫЕ ВЕСЫ (GARLYN Bodyscan Master) ============
 
     BC_FIELDS = (
@@ -1336,6 +1362,26 @@ class Database:
         except Exception as e:
             logger.error(f"get_bc_trend: {e}")
             return out
+
+    def get_bc_period(self, days: int = 90, team: str = None) -> List[Dict]:
+        """Получить данные состава тела за период (для Excel-отчёта)."""
+        try:
+            sql = """
+                SELECT bc.*, a.full_name, a.team, a.age_group, a.id as athlete_id
+                FROM body_composition bc
+                JOIN athletes a ON a.id = bc.athlete_id
+                WHERE bc.record_date >= date('now', '-' || ? || ' days')
+                  AND NOT EXISTS (SELECT 1 FROM coach_teams ct WHERE ct.telegram_id = a.telegram_id)
+            """
+            params: list = [days]
+            if team:
+                sql += " AND a.team = ?"
+                params.append(team)
+            sql += " ORDER BY a.team, a.full_name, bc.record_date DESC"
+            return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+        except Exception as e:
+            logger.error(f"get_bc_period: {e}")
+            return []
 
     def get_scale_profiles(self) -> Dict[str, int]:
         """Сопоставление «профиль весов → athlete_id»."""

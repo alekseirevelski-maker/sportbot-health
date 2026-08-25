@@ -2,7 +2,8 @@
 Парсер данных с умных часов для спортивного бота ЧБК.
 Поддерживает реальные форматы популярных брендов.
 """
-import json, re, logging
+import json, re, logging, io, zipfile
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import Optional
 
@@ -53,11 +54,14 @@ TXT_KEY_MAP = {
 }
 
 
-def parse_watch(content: str, filename: str) -> dict:
-    """Основная функция: контент файла + имя → словарь с данными."""
+def parse_watch(content: str, filename: str, raw_bytes: bytes = None) -> dict:
+    """Основная функция: контент файла + имя → словарь с данными.
+    raw_bytes — сырые байты файла (нужны для ZIP)."""
     data = {}
     try:
-        if filename.endswith(".json"):
+        if filename.endswith(".zip") and raw_bytes:
+            data = _parse_apple_health_zip(raw_bytes)
+        elif filename.endswith(".json"):
             data = _parse_json(content, data)
         elif filename.endswith(".csv"):
             data = _parse_csv(content, data)
@@ -114,6 +118,11 @@ def _parse_json(content: str, data: dict) -> dict:
         if hrv and isinstance(hrv, (int, float)):
             data["📊 HRV"] = int(hrv)
 
+        # Вес
+        weight = jd.get("weight") or jd.get("body_weight") or jd.get("mass")
+        if weight and isinstance(weight, (int, float)):
+            data["⚖️ Вес"] = round(weight, 1)
+
         # Apple Health metrics массив
         if "metrics" in jd and isinstance(jd["metrics"], list):
             for m in jd["metrics"]:
@@ -133,6 +142,8 @@ def _parse_json(content: str, data: dict) -> dict:
                     data["🫁 SpO2"] = f"{v}%"
                 elif "hrv" in n:
                     data["📊 HRV"] = int(v)
+                elif "weight" in n or "mass" in n:
+                    data["⚖️ Вес"] = round(v, 1)
 
     return data
 
@@ -194,6 +205,8 @@ def _parse_csv(content: str, data: dict) -> dict:
                 data["🫁 SpO2"] = f"{int(val)}%"
             elif key == "hrv":
                 data["📊 HRV"] = int(val)
+            elif key == "weight":
+                data["⚖️ Вес"] = round(float(val), 1)
         # Берём только первую строку данных
         break
 
@@ -235,5 +248,126 @@ def _parse_txt(content: str, data: dict) -> dict:
             data["🫁 SpO2"] = f"{int(val)}%"
         elif key == "hrv":
             data["📊 HRV"] = int(val)
+        elif key == "weight":
+            data["⚖️ Вес"] = round(float(val), 1)
+
+    return data
+
+
+# Apple Health XML типы → наши ключи
+APPLE_HEALTH_TYPES = {
+    "HKQuantityTypeIdentifierHeartRate": "heart_rate",
+    "HKQuantityTypeIdentifierRestingHeartRate": "resting_hr",
+    "HKQuantityTypeIdentifierHeartRateVariabilitySDNN": "hrv",
+    "HKQuantityTypeIdentifierStepCount": "steps",
+    "HKQuantityTypeIdentifierOxygenSaturation": "spo2",
+    "HKCategoryTypeIdentifierSleepAnalysis": "sleep",
+    "HKQuantityTypeIdentifierBodyMass": "weight",
+}
+
+
+def _parse_apple_health_zip(raw_bytes: bytes) -> dict:
+    """Распаковать ZIP от Apple Health и извлечь данные из XML."""
+    data = {}
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
+            # Ищем XML файл (обычно export.xml или export_small.xml)
+            xml_names = [n for n in zf.namelist() if n.endswith(".xml")]
+            if not xml_names:
+                logger.warning("No XML found in Apple Health ZIP")
+                return data
+
+            # Берём первый XML (обычно export.xml)
+            xml_name = xml_names[0]
+            with zf.open(xml_name) as xml_file:
+                data = _parse_apple_health_xml(xml_file, data)
+    except zipfile.BadZipFile:
+        logger.error("Invalid ZIP file")
+    except Exception as e:
+        logger.error(f"Apple Health ZIP parse error: {e}")
+    return data
+
+
+def _parse_apple_health_xml(xml_file, data: dict) -> dict:
+    """Парсить Apple Health XML (export.xml) и извлечь последние значения."""
+    # Собираем все значения по типам, берём последнее (самое свежее)
+    values = {}
+    # Для сна: собираем все записи и суммируем длительность
+    sleep_records = []
+
+    # Apple Health XML может быть очень большим — используем iterparse
+    for event, elem in ET.iterparse(xml_file, events=("end",)):
+        if elem.tag == "Record":
+            record_type = elem.get("type", "")
+            value_str = elem.get("value", "")
+            source = elem.get("sourceName", "")
+            start_date = elem.get("startDate", "")
+            end_date = elem.get("endDate", "")
+
+            if record_type in APPLE_HEALTH_TYPES and record_type != "HKCategoryTypeIdentifierSleepAnalysis":
+                if value_str:
+                    try:
+                        val = float(value_str)
+                        key = APPLE_HEALTH_TYPES[record_type]
+                        # Для пульса покоя — только из Apple Watch (не iPhone)
+                        if key == "resting_hr" and "iphone" in source.lower():
+                            continue
+                        # Берём последнее значение по каждому типу
+                        values[key] = val
+                    except (ValueError, TypeError):
+                        pass
+
+            # Сон — отдельная логика (суммируем длительность)
+            if record_type == "HKCategoryTypeIdentifierSleepAnalysis":
+                try:
+                    fmt = "%d.%m.%Y %H:%M"
+                    # Apple Health может использовать разные форматы
+                    for f in [fmt, "%Y-%m-%d %H:%M:%S %z", "%d.%m.%Y %H:%M:%S"]:
+                        try:
+                            dt_start = datetime.strptime(start_date.split(" ")[0] + " " + start_date.split(" ")[1], f)
+                            dt_end = datetime.strptime(end_date.split(" ")[0] + " " + end_date.split(" ")[1], f)
+                            break
+                        except:
+                            continue
+                    else:
+                        continue
+                    # Берём только сон за последние 24ч
+                    from datetime import timedelta
+                    now = datetime.now()
+                    if (now - dt_end).total_seconds() < 86400:
+                        duration_hours = (dt_end - dt_start).total_seconds() / 3600
+                        if 0.5 < duration_hours < 14:  # валидная длительность
+                            sleep_records.append(duration_hours)
+                except Exception:
+                    pass
+
+        elem.clear()
+
+    # Маппинг в наш формат
+    if "resting_hr" in values:
+        data["💓 Пульс"] = int(values["resting_hr"])
+    elif "heart_rate" in values:
+        data["💓 Пульс"] = int(values["heart_rate"])
+
+    if "steps" in values:
+        data["🏃 Шаги"] = int(values["steps"])
+
+    if "hrv" in values:
+        data["📊 HRV"] = int(values["hrv"])
+
+    if "spo2" in values:
+        # Apple Health хранит SpO2 как долю (0.95-1.0)
+        spo2_val = values["spo2"]
+        if spo2_val <= 1.0:
+            spo2_val = spo2_val * 100
+        data["🫁 SpO2"] = f"{int(spo2_val)}%"
+
+    if "weight" in values:
+        data["⚖️ Вес"] = round(values["weight"], 1)
+
+    # Сон: суммируем все записи сна за последние 24ч
+    if sleep_records:
+        total_hours = sum(sleep_records)
+        data["😴 Сон"] = f"{total_hours:.1f}ч"
 
     return data
