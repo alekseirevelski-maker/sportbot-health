@@ -194,15 +194,15 @@ RECOMMENDATIONS = {
 # База данных
 DB_PATH = Path(__file__).parent / "data" / "sport_health.db"
 
-# Прокси
-PROXY_URL = os.environ.get("PROXY_URL", "http://127.0.0.1:10809")
+# Прокси (пусто = без прокси)
+PROXY_URL = os.environ.get("PROXY_URL", "")
 
 # Rate limiting
 RATE_LIMIT_MESSAGES = int(os.environ.get("RATE_LIMIT_MESSAGES", "30"))
 RATE_LIMIT_WINDOW = int(os.environ.get("RATE_LIMIT_WINDOW", "60"))
 
 # Админы (супер-пользователи; врачи/тренеры — в БД)
-ADMIN_IDS = {351572247}
+ADMIN_IDS = {int(x) for x in os.environ.get("ADMIN_IDS", "351572247").split(",") if x.strip()}
 
 # Напоминания по умолчанию (переопределяются из БД при старте)
 REMINDER_HOUR_DEFAULT = 8
