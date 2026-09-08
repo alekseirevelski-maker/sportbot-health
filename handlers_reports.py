@@ -1013,6 +1013,9 @@ class ReportsMixin:
             ("reinjury_fear", "Страх травмы"), ("goal", "Цель"), ("wish", "Пожелания"),
         ]
 
+        # PII поля для маскировки в экспорте
+        PII_FIELDS = {"phone", "birth_date", "surgery_date"}
+
         # ---- Определяем блоки анкеты (для читабельной двухуровневой шапки) ----
         # блок: (название, цвет, список ключей)
         blocks = [
@@ -1106,6 +1109,9 @@ class ReportsMixin:
                 v = qd.get(key, "")
                 if isinstance(v, float):
                     v = round(v, 1)
+                # Маскировка PII полей
+                if key in PII_FIELDS and v:
+                    v = "***"
                 row_vals.append(v if v is not None else "")
             row_fill = PatternFill(start_color="F7F9FC", end_color="F7F9FC", fill_type="solid") if zebra else None
             for ci, v in enumerate(row_vals, 1):
@@ -1447,7 +1453,7 @@ class ReportsMixin:
             )
         except Exception as e:
             logger.error(f"PDF report error: {e}")
-            await q.edit_message_text(f"❌ Ошибка: {e}", reply_markup=self.kb([[(f"🔙 Назад", "admin_manage")]]))
+            await q.edit_message_text(f"❌ Ошибка", reply_markup=self.kb([[(f"🔙 Назад", "admin_manage")]]))
 
 
     def _xl_score_fill(self, val):

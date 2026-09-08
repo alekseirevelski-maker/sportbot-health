@@ -406,13 +406,21 @@ class AdminMixin:
             return
 
         athlete_id = int(q.data.replace("delconfirm_", ""))
-        self.db.conn.execute("DELETE FROM daily_wellness WHERE athlete_id = ?", (athlete_id,))
-        self.db.conn.execute("DELETE FROM alerts WHERE athlete_id = ?", (athlete_id,))
+        # Удаление ВСЕХ данных спортсмена (включая PII)
+        tables_with_athlete = [
+            "daily_wellness", "alerts", "questionnaires", "watch_data",
+            "body_composition", "scale_profiles", "consultations", "athlete_goals"
+        ]
+        for table in tables_with_athlete:
+            try:
+                self.db.conn.execute(f"DELETE FROM {table} WHERE athlete_id = ?", (athlete_id,))
+            except Exception:
+                pass  # Таблица может не существовать
         self.db.conn.execute("DELETE FROM athletes WHERE id = ?", (athlete_id,))
         self.db.conn.commit()
 
         await q.edit_message_text(
-            "✅ Спортсмен удалён.",
+            "✅ Спортсмен и ВСЕ его данные удалены.",
             reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]]), parse_mode="Markdown"
         )
 
@@ -562,7 +570,7 @@ class AdminMixin:
                 await q.edit_message_text("✅ *Напоминания отправлены!*", parse_mode="Markdown", reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]]))
             except Exception as e:
                 logger.error(f"Send now error: {e}")
-                await q.edit_message_text(f"❌ Ошибка: {e}", reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]]))
+                await q.edit_message_text(f"❌ Ошибка", reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]]))
             return
 
         hour = int(data)
@@ -591,7 +599,7 @@ class AdminMixin:
             await q.edit_message_text("✅ *Напоминания отправлены!*", parse_mode="Markdown", reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]]))
         except Exception as e:
             logger.error(f"Send now error: {e}")
-            await q.edit_message_text(f"❌ Ошибка: {e}", reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]]))
+            await q.edit_message_text(f"❌ Ошибка", reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]]))
 
 
     async def send_questionnaire_reminder(self, update, ctx):
@@ -642,7 +650,7 @@ class AdminMixin:
             )
         except Exception as e:
             logger.error(f"Send questionnaire reminder error: {e}")
-            await q.edit_message_text(f"❌ Ошибка: {e}", reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]]))
+            await q.edit_message_text(f"❌ Ошибка", reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]]))
 
     # ==================== ОТЧЕТ ПО ДНЯМ ====================
 

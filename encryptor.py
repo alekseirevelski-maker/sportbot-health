@@ -23,7 +23,8 @@ def _get_cipher():
         return _cipher
     key = os.environ.get("ENCRYPTION_KEY", "") or os.environ.get("SPORTBOT_KEY", "")
     if len(key) < 32:
-        logger.warning("ENCRYPTION_KEY не задан или <32 символов — шифрование ПД ОТКЛЮЧЕНО")
+        logger.critical("ENCRYPTION_KEY не задан или <32 символов — ШИФРОВАНИЕ ПД ОБЯЗАТЕЛЬНО!")
+        logger.critical("Установите ENCRYPTION_KEY в .env (минимум 32 символа)")
         _key_valid = False
         return None
     try:
@@ -44,12 +45,13 @@ def encrypt_value(value) -> Optional[str]:
         return value
     c = _get_cipher()
     if c is None:
-        return value  # нет ключа — сохраняем открытым (не ломаем работу)
+        logger.error("ПОПЫТКА ШИФРОВАНИЯ БЕЗ КЛЮЧА! Данные НЕ сохранены.")
+        raise RuntimeError("Encryption key not configured. Cannot save PII.")
     try:
         return c.encrypt(str(value).encode()).decode()
     except Exception as e:
         logger.error(f"encrypt error: {e}")
-        return value
+        raise RuntimeError(f"Encryption failed: {e}")
 
 
 def decrypt_value(value) -> Optional[str]:

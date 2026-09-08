@@ -1564,7 +1564,7 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                 )
                 sent += 1
             except Exception as e:
-                logger.error(f"Reminder error for {a['full_name']} (tg={a['telegram_id']}): {e}")
+                logger.error(f"Reminder error for athlete #{a['id']}: {e}")
 
         logger.info(f"Reminder sent to {sent}/{len(athletes)} ({skipped} already surveyed)")
 

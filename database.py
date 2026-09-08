@@ -41,6 +41,15 @@ class Database:
     def __init__(self, db_path: str = None):
         self.db_path = Path(db_path) if db_path else DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Ограничение прав на файл БД (только владелец может читать/писать)
+        if self.db_path.exists():
+            try:
+                import stat
+                self.db_path.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 600
+            except Exception:
+                pass  # Windows не поддерживает chmod
+
         self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         # WAL-журнал повышает конкурентность чтения/записи (важно при асинхронном доступе)
@@ -1037,7 +1046,21 @@ class Database:
         """Загрузить состояние пользователя из БД (JSON-строка). None если нет."""
         try:
             row = self.conn.execute("SELECT payload FROM user_states WHERE user_id = ?", (user_id,)).fetchone()
-            return row["payload"] if row else None
+            if not row:
+                return None
+            payload = row["payload"]
+            # Попытка расшифровки (если зашифровано)
+            try:
+                from encryptor import decrypt_value
+                decrypted = decrypt_value(payload)
+                if decrypted and decrypted != payload:
+                    import json as _json
+                    return _json.loads(decrypted)
+            except Exception:
+                pass
+            # Если не зашифровано — возвращаем как есть (обратная совместимость)
+            import json as _json
+            return _json.loads(payload)
         except Exception as e:
             logger.error(f"load_user_state: {e}")
             return None
@@ -1045,9 +1068,13 @@ class Database:
     def save_user_state(self, user_id, payload) -> bool:
         try:
             import json as _json
+            from encryptor import encrypt_value
+            json_str = _json.dumps(payload, ensure_ascii=False, default=str)
+            # Шифруем payload перед сохранением
+            encrypted = encrypt_value(json_str)
             self.conn.execute(
                 "INSERT OR REPLACE INTO user_states (user_id, payload, updated_at) VALUES (?, ?, datetime('now'))",
-                (user_id, _json.dumps(payload, ensure_ascii=False, default=str))
+                (user_id, encrypted)
             )
             self.conn.commit()
             return True
@@ -1636,3 +1663,132 @@ class Database:
         except Exception as e:
             logger.error(f"get_all_doctors: {e}")
         return out
+
+    # ============ МУЛЬТИ-ТЕНАНТНОСТЬ (clubs) ============
+
+    def create_club(self, name: str, slug: str, admin_telegram_id: int,
+                    sport: str = "basketball", plan: str = "free") -> Optional[int]:
+        """Создать новый клуб. Возвращает club_id или None."""
+        try:
+            # Лимиты тарифов
+            limits = {"free": 10, "pro": 50, "enterprise": 200}
+            max_athletes = limits.get(plan, 10)
+            self.conn.execute(
+                "INSERT INTO clubs (name, slug, admin_telegram_id, sport, subscription_plan, max_athletes) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (name, slug, admin_telegram_id, sport, plan, max_athletes)
+            )
+            self.conn.commit()
+            row = self.conn.execute("SELECT id FROM clubs WHERE slug = ?", (slug,)).fetchone()
+            return row["id"] if row else None
+        except sqlite3.IntegrityError:
+            return None
+
+    def get_club_by_slug(self, slug: str) -> Optional[Dict]:
+        row = self.conn.execute("SELECT * FROM clubs WHERE slug = ?", (slug,)).fetchone()
+        return dict(row) if row else None
+
+    def get_club_by_id(self, club_id: int) -> Optional[Dict]:
+        row = self.conn.execute("SELECT * FROM clubs WHERE id = ?", (club_id,)).fetchone()
+        return dict(row) if row else None
+
+    def get_club_by_admin(self, telegram_id: int) -> Optional[Dict]:
+        row = self.conn.execute(
+            "SELECT * FROM clubs WHERE admin_telegram_id = ?", (telegram_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def is_club_admin(self, telegram_id: int) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM clubs WHERE admin_telegram_id = ?", (telegram_id,)
+        ).fetchone()
+        return row is not None
+
+    def get_club_teams(self, club_id: int) -> List[str]:
+        """Получить список команд клуба."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT team FROM athletes WHERE club_id = ? ORDER BY team", (club_id,)
+        ).fetchall()
+        return [r["team"] for r in rows]
+
+    def get_club_stats(self, club_id: int) -> Dict:
+        """Статистика клуба: кол-во спортсменов, тренеров, опросов."""
+        athletes = self.conn.execute(
+            "SELECT COUNT(*) as cnt FROM athletes WHERE club_id = ?", (club_id,)
+        ).fetchone()["cnt"]
+        teams = len(self.get_club_teams(club_id))
+        coaches = self.conn.execute(
+            "SELECT COUNT(*) as cnt FROM coach_teams WHERE club_id = ?", (club_id,)
+        ).fetchone()["cnt"]
+        surveys = self.conn.execute(
+            "SELECT COUNT(*) as cnt FROM daily_wellness dw "
+            "JOIN athletes a ON dw.athlete_id = a.id WHERE a.club_id = ?", (club_id,)
+        ).fetchone()["cnt"]
+        return {"athletes": athletes, "teams": teams, "coaches": coaches, "surveys": surveys}
+
+    def register_athlete_mt(self, telegram_id: int, username: str,
+                            full_name: str, age_group: str, team: str,
+                            club_id: int, first_name: str = None) -> bool:
+        """Регистрация спортсмена с привязкой к клубу."""
+        try:
+            # Проверяем лимит клуба
+            club = self.get_club_by_id(club_id)
+            if club:
+                count = self.conn.execute(
+                    "SELECT COUNT(*) as cnt FROM athletes WHERE club_id = ?", (club_id,)
+                ).fetchone()["cnt"]
+                if count >= club["max_athletes"]:
+                    return False
+            self.conn.execute(
+                """INSERT INTO athletes
+                   (telegram_id, username, full_name, age_group, team, last_active, first_name, club_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (telegram_id, username, full_name, age_group, team, date.today(), first_name, club_id)
+            )
+            self.conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def add_coach_mt(self, telegram_id: int, team: str, club_id: int) -> bool:
+        """Назначить тренера команде в рамках клуба."""
+        try:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO coach_teams (telegram_id, team, club_id) VALUES (?, ?, ?)",
+                (telegram_id, team, club_id)
+            )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"add_coach_mt: {e}")
+            return False
+
+    def get_athlete_club_id(self, athlete_id: int) -> Optional[int]:
+        row = self.conn.execute(
+            "SELECT club_id FROM athletes WHERE id = ?", (athlete_id,)
+        ).fetchone()
+        return row["club_id"] if row else None
+
+    def get_user_club(self, telegram_id: int) -> Optional[Dict]:
+        """Найти клуб пользователя: сначала как admin, потом как тренер/врач."""
+        # Проверяем admin
+        club = self.get_club_by_admin(telegram_id)
+        if club:
+            return club
+        # Проверяем тренер
+        row = self.conn.execute(
+            "SELECT c.* FROM coach_teams ct "
+            "JOIN clubs c ON ct.club_id = c.id "
+            "WHERE ct.telegram_id = ? LIMIT 1", (telegram_id,)
+        ).fetchone()
+        if row:
+            return dict(row)
+        # Проверяем врач
+        row = self.conn.execute(
+            "SELECT c.* FROM doctors d "
+            "JOIN clubs c ON d.club_id = c.id "
+            "WHERE d.telegram_id = ? LIMIT 1", (telegram_id,)
+        ).fetchone()
+        if row:
+            return dict(row)
+        return None
