@@ -384,6 +384,9 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
 
     async def handle_document(self, update, ctx):
         user_id = update.effective_user.id
+        if not self.check_rate_limit(user_id):
+            await update.message.reply_text("⚠️ Подожди минуту.")
+            return
         athlete = self.db.get_athlete_by_telegram_id(user_id)
         # Врач/тренер может присылать CSV весов, даже если сам не спортсмен.
         if not athlete and not self._is_full_access(user_id):
@@ -1133,6 +1136,13 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
             await q.answer()
         except Exception:
             pass
+        # Rate-limit: спам инлайн-кнопками (общий счётчик с текстом, 30/мин)
+        if not self.check_rate_limit(q.from_user.id):
+            try:
+                await q.answer("⚠️ Подожди минуту.", show_alert=True)
+            except Exception:
+                pass
+            return
         d = q.data
         logger.info(f"Callback: {d} from {q.from_user.id}")
 
