@@ -8,3 +8,4 @@ healthcheck.log
 __pycache__/
 *.pyc
 bot.pid
+.superpowers/
