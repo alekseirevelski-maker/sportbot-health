@@ -1418,6 +1418,11 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                 await self._ask_cycle_length_custom(update, ctx)
             elif d.startswith("cycle_len_"):
                 await self._cycle_length_chosen(update, ctx)
+            elif d.startswith("cycle_"):
+                # Старые кнопки-корзины (cycle_1..26) из опросов, отправленных
+                # до обновления: состояние шага уже не то → предлагаем заново,
+                # а не молча теряем тап
+                await self._broken_survey_reply(update.callback_query, update)
             elif d.startswith("anchor_"):
                 await self.set_cycle_anchor(update, ctx)
             elif d == "cyc_set_anchor":
@@ -1642,9 +1647,9 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
         bot = context.bot
         try:
             # Batch: данные за 3 дня для всех
-            n_days_map = self.db.get_last_n_days_all(3)
-            if not n_days_map:
-                return
+            # Без опросов цикл всё равно идёт: не выходим рано — просто
+            # нечего считать по трендам (пустой map → цикл ниже отработает)
+            n_days_map = self.db.get_last_n_days_all(3) or {}
 
             athletes = self.db.get_all_athletes()
             athlete_map = {a["id"]: a for a in athletes}
@@ -1692,6 +1697,8 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
 
             # Паттерны 6-7: цикл — задержка >7 дн. и аменорея ≥90 дн. (FLOW-модель).
             # Дедуп: повтор не чаще раза в 7 дней на девушку/тип (bot_settings).
+            # Цикл-линии первыми: при обрезке дайджеста (15 штук) врач аменорею
+            # точно увидит.
             from cycle_ui import cycle_alert_lines
             last_sent = {}
             for a in athletes:
@@ -1699,9 +1706,8 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                     v = self.db.get_setting(f"cycle_alert_{a['id']}_{kind}")
                     if v:
                         last_sent[f"cycle_alert_{a['id']}_{kind}"] = v
-            for key, cyc_line in cycle_alert_lines(athletes, date.today(), last_sent):
-                alerts.append(cyc_line)
-                self.db.set_setting(key, date.today().isoformat())
+            cycle_fired = cycle_alert_lines(athletes, date.today(), last_sent)
+            alerts = [line for _key, line in cycle_fired] + alerts
 
             # Отправка алертов врачам
             if alerts:
@@ -1710,11 +1716,19 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                 if len(alerts) > 15:
                     alert_text += f"\n\n… и ещё {len(alerts) - 15}"
 
+                sent_ok = False
                 for admin_id in self._full_access_ids():
                     try:
                         await bot.send_message(chat_id=admin_id, text=alert_text, parse_mode="Markdown")
+                        sent_ok = True
                     except Exception as e:
                         logger.error(f"Trend alert send error: {e}")
+
+                if sent_ok:
+                    # Метки дедупа — только после успешной доставки: не ушло —
+                    # завтра алерт повторится
+                    for key, _line in cycle_fired:
+                        self.db.set_setting(key, date.today().isoformat())
 
                 logger.info(f"Trend alerts sent: {len(alerts)} patterns detected")
             else:

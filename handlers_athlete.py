@@ -924,6 +924,11 @@ class AthleteMixin:
             else:
                 text += "Нет даты начала — бот считает день цикла от события «месячные " \
                         "начались». Нажми «Отметить начало» или ответь на один вопрос в опросе.\n"
+            stored = self.db.get_cycle_history(athlete["id"], 60)
+            if stored:
+                text += "\n*Старые записи (до якоря):*\n"
+                for e in stored[:7]:
+                    text += f"  📅 {e.get('survey_date', '?')}: день {e.get('cycle_day', '—')}\n"
             buttons.append([(f"🔙 Назад", "main_menu")])
             await q.edit_message_text(text, reply_markup=self.kb(buttons),
                                       parse_mode="Markdown")
@@ -1074,7 +1079,8 @@ class AthleteMixin:
 
         if d.startswith("anchor_") and d[7:].isdigit():
             target = today - timedelta(days=int(d[7:]))
-            await self._save_cycle_anchor(q, state, athlete, target, "one_time_question")
+            if await self._save_cycle_anchor(q, state, athlete, target, "one_time_question"):
+                await self._ask_complaints(update, ctx)
         elif d == "anchor_custom":
             state["step"] = "survey_anchor_date"
             await q.edit_message_text(
@@ -1119,6 +1125,10 @@ class AthleteMixin:
                                            target, "manual_date")
         if ok and in_survey:
             await self._ask_complaints(update, ctx)
+        elif ok:
+            # вне опроса: шаг снимаем, иначе этот же текстовый шаг ловит
+            # любое следующее сообщение до скончания веков
+            state["step"] = None
 
     async def ask_cycle_day(self, update, ctx):
         """Ежедневный шаг цикла: один тап «начались сегодня?» (FLOW-модель).
@@ -1133,7 +1143,8 @@ class AthleteMixin:
             await self.ask_cycle_anchor(update, ctx)
             return
         state["step"] = "survey_cycle_daily"
-        cl = athlete.get("cycle_length_default") or 28
+        fresh = self.db.get_athlete_by_telegram_id(user_id) or athlete
+        cl = fresh.get("cycle_length_default") or 28
         from cycle_engine import status as cycle_status
         from cycle_ui import daily_cycle_keyboard, daily_cycle_text
         name = athlete.get("first_name") or str(athlete.get("full_name", "")).split()[-1]
@@ -1154,15 +1165,20 @@ class AthleteMixin:
         from datetime import date as _d
         from cycle_ui import survey_cycle_values
         today = _d.today()
+        # длину берём из БД: в state-копии может быть устаревший cycle_length_default
+        fresh = self.db.get_athlete_by_telegram_id(q.from_user.id) or athlete
         start = self.db.get_last_period_start(athlete["id"])
         if start is None:
             await self.ask_cycle_anchor(update, ctx)
             return
-        cl = athlete.get("cycle_length_default") or 28
+        cl = fresh.get("cycle_length_default") or 28
         d = q.data
 
         if d == "cyc_start":
-            self.db.add_cycle_event(athlete["id"], today, type="start", source="survey_button")
+            if not self.db.add_cycle_event(athlete["id"], today,
+                                           type="start", source="survey_button"):
+                await self._broken_survey_reply(q, update)
+                return
             learned = self.db.update_cycle_length_from_history(athlete["id"])
             if learned:
                 athlete["cycle_length_default"] = learned

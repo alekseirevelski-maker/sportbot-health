@@ -279,27 +279,36 @@ class AdminMixin:
                 not_passed.append(a)
 
         from cycle_ui import athlete_cycle_line
-        text = (
-            f"📅 *Отчёт за {today.strftime('%d.%m.%Y')}*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"✅ *Прошли опрос ({len(passed)}):*\n"
-        )
-        for a in passed:
-            text += f"  • {a['full_name']} ({a['team']})\n"
-            cyc = athlete_cycle_line(a, today)
-            if cyc:
-                text += f"      🌸 {cyc}\n"
 
-        if not_passed:
-            text += f"\n❌ *Не прошли ({len(not_passed)}):*\n"
-            for a in not_passed:
+        def _report_text(mode):
+            """mode: 'all' — цикл каждой; 'abnormal' — только задержка/🚫;
+            'off' — без цикла (иначе не влезет в лимит Telegram 4096)."""
+            text = (
+                f"📅 *Отчёт за {today.strftime('%d.%m.%Y')}*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"✅ *Прошли опрос ({len(passed)}):*\n"
+            )
+            for a in passed:
                 text += f"  • {a['full_name']} ({a['team']})\n"
-                cyc = athlete_cycle_line(a, today)
-                if cyc:
+                cyc = athlete_cycle_line(a, today) if mode != "off" else None
+                if cyc and (mode == "all" or "⚠️" in cyc or "🚫" in cyc):
                     text += f"      🌸 {cyc}\n"
+            if not_passed:
+                text += f"\n❌ *Не прошли ({len(not_passed)}):*\n"
+                for a in not_passed:
+                    text += f"  • {a['full_name']} ({a['team']})\n"
+                    cyc = athlete_cycle_line(a, today) if mode != "off" else None
+                    if cyc and (mode == "all" or "⚠️" in cyc or "🚫" in cyc):
+                        text += f"      🌸 {cyc}\n"
+            text += f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            text += f"Итого: {len(passed)}/{len(athletes)} прошли"
+            return text
 
-        text += f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        text += f"Итого: {len(passed)}/{len(athletes)} прошли"
+        text = _report_text("all")
+        if len(text) > 3900:
+            text = _report_text("abnormal")
+        if len(text) > 3900:
+            text = _report_text("off")
 
         buttons = [[(f"📊 Экспорт CSV", "export_csv")], [(f"🔙 Назад", "main_menu")]]
         await q.edit_message_text(text, reply_markup=self.kb(buttons), parse_mode="Markdown")

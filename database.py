@@ -390,14 +390,21 @@ class Database:
             logger.error(f"Set setting error: {e}")
             return False
 
-    def update_athlete_gender(self, athlete_id: int, gender: str, cycle_length: int = 28) -> bool:
+    def update_athlete_gender(self, athlete_id: int, gender: str,
+                              cycle_length: int = None) -> bool:
         try:
-            # Ручная длина = ручной источник: флаг «выучена по истории» сбрасываем
-            self.conn.execute(
-                "UPDATE athletes SET gender = ?, cycle_length_default = ?, "
-                "cycle_length_learned = 0 WHERE id = ?",
-                (gender, cycle_length, athlete_id)
-            )
+            if cycle_length is None:
+                # Смена только пола: длину и флаг «выучена» не трогаем —
+                # иначе пересоздание анкеты стирает персональный цикл
+                self.conn.execute("UPDATE athletes SET gender = ? WHERE id = ?",
+                                  (gender, athlete_id))
+            else:
+                # Ручная длина = ручной источник: флаг «выучена по истории» сбрасываем
+                self.conn.execute(
+                    "UPDATE athletes SET gender = ?, cycle_length_default = ?, "
+                    "cycle_length_learned = 0 WHERE id = ?",
+                    (gender, cycle_length, athlete_id)
+                )
             self.conn.commit()
             return True
         except Exception as e:

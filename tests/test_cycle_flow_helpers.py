@@ -84,3 +84,23 @@ def test_manual_length_resets_learned_flag(tmp_path):
     assert db.get_athlete_by_telegram_id(555001)["cycle_length_learned"] == 1
     db.update_athlete_gender(aid, "female", 24)  # девушка поправила длину вручную
     assert db.get_athlete_by_telegram_id(555001)["cycle_length_learned"] == 0
+
+
+def test_gender_change_without_length_keeps_learned(tmp_path):
+    """Риск R13: смена пола без длины не должна обнулять выученный цикл."""
+    db, aid = _girl(tmp_path)
+    for d in (date(2026, 5, 1), date(2026, 5, 31), date(2026, 7, 4)):
+        db.add_cycle_event(aid, d)                    # интервалы 30 и 34 → медиана 32
+    assert db.update_cycle_length_from_history(aid) == 32
+    db.update_athlete_gender(aid, "female")           # только пол, длину не трогаем
+    a = db.get_athlete_by_telegram_id(555001)
+    assert a["cycle_length_default"] == 32
+    assert a["cycle_length_learned"] == 1
+
+
+def test_missed_days_counter_grows(tmp_path):
+    """Review Focus №2: три дня без опроса — счётчик не обнуляется."""
+    start = date(2026, 10, 1)
+    for i in (21, 22, 23):
+        v = survey_cycle_values(start, 28, date(2026, 10, i))
+        assert v["cycle_day"] == i

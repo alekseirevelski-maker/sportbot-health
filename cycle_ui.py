@@ -145,6 +145,9 @@ def apply_anchor(db, athlete_id: int, target: date, today: date,
     else:
         if not db.add_cycle_event(athlete_id, target, type="anchor", source=source):
             return None
+    # дата есть — значит менструация была: снимаем escape-флаг pre/skip,
+    # иначе опрос вечно skip-ит цикл, а на 90-й день прилетит ложный 🚫 врачу
+    db.set_menarche_status(athlete_id, None)
     learned = db.update_cycle_length_from_history(athlete_id)
     length = learned or current_length or 28
     start = db.get_last_period_start(athlete_id)
