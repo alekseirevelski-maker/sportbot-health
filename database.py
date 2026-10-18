@@ -343,6 +343,28 @@ class Database:
                 self.conn.execute(
                     "UPDATE athletes SET first_name = ? WHERE id = ?", (clean, r["id"])
                 )
+        # Цикл (FLOW-модель, спека 2026-10-18): события «месячные начались» + кэш якоря
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS cycle_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                athlete_id INTEGER NOT NULL,
+                event_date DATE NOT NULL,
+                type TEXT NOT NULL CHECK (type IN ('start','anchor','end')),
+                source TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (athlete_id, event_date, type),
+                FOREIGN KEY (athlete_id) REFERENCES athletes(id)
+            )""")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_cycle_events_athlete ON cycle_events(athlete_id, event_date)")
+        # Миграция: кэш последней даты начала; добровольный статус («пока не было»/«нет данных»)
+        try:
+            self.conn.execute("ALTER TABLE athletes ADD COLUMN last_period_start DATE")
+        except Exception:
+            pass  # колонка уже есть
+        try:
+            self.conn.execute("ALTER TABLE athletes ADD COLUMN menarche_status TEXT")
+        except Exception:
+            pass  # колонка уже есть
         self.conn.commit()
 
     def get_setting(self, key: str, default: str = None) -> str:
@@ -380,6 +402,63 @@ class Database:
             ORDER BY survey_date DESC
         """, (athlete_id, days)).fetchall()
         return [dict(r) for r in rows]
+
+    # ---------- События цикла (FLOW-модель) ----------
+
+    def add_cycle_event(self, athlete_id: int, event_date: date,
+                        type: str = "start", source: str = "survey_button") -> bool:
+        """Записать событие цикла; повтор того же дня/типа идемпотентен (двойной тап).
+
+        'start'/'anchor' задвигают кэш last_period_start, но никогда не откатывают его назад.
+        Даты храним ISO-строками — порядковое сравнение работает лексикографически.
+        """
+        iso = event_date.isoformat()
+        try:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO cycle_events (athlete_id, event_date, type, source) "
+                "VALUES (?, ?, ?, ?)", (athlete_id, iso, type, source))
+            if type in ("start", "anchor"):
+                self.conn.execute(
+                    "UPDATE athletes SET last_period_start = ? WHERE id = ? "
+                    "AND (last_period_start IS NULL OR last_period_start < ?)",
+                    (iso, athlete_id, iso))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Add cycle event: {e}")
+            return False
+
+    def get_last_period_start(self, athlete_id: int) -> Optional[date]:
+        """Кэш якоря (день цикла считается от него), None если якоря нет."""
+        row = self.conn.execute(
+            "SELECT last_period_start FROM athletes WHERE id = ?", (athlete_id,)).fetchone()
+        if not row or not row["last_period_start"]:
+            return None
+        v = row["last_period_start"]
+        return date.fromisoformat(str(v)) if isinstance(v, str) else v
+
+    def get_cycle_events(self, athlete_id: int,
+                         types: tuple = ("start", "anchor")) -> List[date]:
+        """Даты событий цикла по возрастанию (обучение длины, экран «Мой цикл»)."""
+        placeholders = ",".join("?" * len(types))
+        rows = self.conn.execute(
+            f"SELECT event_date FROM cycle_events WHERE athlete_id = ? "
+            f"AND type IN ({placeholders}) ORDER BY event_date",
+            (athlete_id, *types)).fetchall()
+        return [date.fromisoformat(str(r["event_date"])) if isinstance(r["event_date"], str)
+                else r["event_date"] for r in rows]
+
+    def set_menarche_status(self, athlete_id: int, status: Optional[str]) -> bool:
+        """'pre' — пока не было (опрос не спрашивает), 'skip' — нет данных (не напоминать),
+        None — снять флаги (вернулась через «Мой цикл»)."""
+        try:
+            self.conn.execute(
+                "UPDATE athletes SET menarche_status = ? WHERE id = ?", (status, athlete_id))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Set menarche status: {e}")
+            return False
 
     def register_athlete(self, telegram_id: int, username: str,
                          full_name: str, age_group: str, team: str,
@@ -586,11 +665,12 @@ class Database:
                 data.get("illness_flag"), 1 if data.get("analgesics") else 0
             ))
 
-        # Обновляем streak
+        # Обновляем streak. ВАЖНО: без LIMIT — серия должна расти
+        # дальше 60 дней (баг от 2026-10: LIMIT 60 навечно запирал streak=60).
         last_surveys = self.conn.execute(
             """SELECT DISTINCT survey_date FROM daily_wellness
                WHERE athlete_id = ?
-               ORDER BY survey_date DESC LIMIT 60""",
+               ORDER BY survey_date DESC""",
             (athlete_id,)
         ).fetchall()
         dates = []
