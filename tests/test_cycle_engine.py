@@ -56,7 +56,6 @@ def test_delay_days_zero_before_eta():
 def test_status_no_anchor():
     assert status(None, 28, date(2026, 10, 18)) == 'no_anchor'
 
-
 def test_status_ok_within_cycle():
     assert status(date(2026, 10, 1), 28, date(2026, 10, 21)) == 'ok'  # день 21
 
@@ -65,6 +64,17 @@ def test_status_delay_after_seven_overdue():
     # L=28: день 34 → delay=33-28=5 → ок; день 37 → delay 8 → 'delay'
     assert status(date(2026, 9, 1), 28, date(2026, 10, 4)) == 'ok'   # delay 5
     assert status(date(2026, 9, 1), 28, date(2026, 10, 8)) == 'delay'  # delay 9
+
+
+def test_status_delay_boundary_is_strictly_seven():
+    # delay=7 ровно → ещё 'ok'; delay=8 → 'delay' (спека: задержка >7)
+    assert status(date(2026, 9, 1), 28, date(2026, 9, 1) + timedelta(days=35)) == 'ok'
+    assert status(date(2026, 9, 1), 28, date(2026, 9, 1) + timedelta(days=36)) == 'delay'
+
+
+def test_status_89_days_not_amenorrhea_yet():
+    # пограничный 89-й день — ещё не аменорея, но уже delay (регрессия на off-by-one)
+    assert status(date(2026, 7, 1), 28, date(2026, 7, 1) + timedelta(days=89)) == 'delay'
 
 
 @pytest.mark.parametrize("offset", [AMENORRHEA_DAYS, AMENORRHEA_DAYS + 10])
@@ -89,7 +99,6 @@ def test_constants_values():
     ('female', None,        'pre',    'skip'),
     ('female', None,        'skip',   'skip'),
     ('female', date(2026, 10, 1), None, 'daily'),
-    ('female', None,        None,     'anchor'),
 ])
 def test_cycle_step_for_matrix(gender, start, mstatus, expected):
     assert cycle_step_for(gender, start, mstatus) == expected

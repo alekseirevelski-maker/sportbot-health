@@ -58,6 +58,13 @@ def test_median_out_of_norm_not_written(tmp_path):
     assert db.get_athlete_by_telegram_id(777001)["cycle_length_default"] == 25
 
 
+def test_median_half_rounds_up(tmp_path):
+    """Интервалы 30 и 35 → 32.5 → 33 (round-half-up предсказуемее banker's)."""
+    db, aid = _girl(tmp_path)
+    _events(db, aid, [30, 35])
+    assert db.update_cycle_length_from_history(aid) == 33
+
+
 def test_old_basket_source_no_longer_used(tmp_path):
     """Старый источник (daily_wellness cycle_day=1) больше не читается: пусто без событий."""
     db, aid = _girl(tmp_path)

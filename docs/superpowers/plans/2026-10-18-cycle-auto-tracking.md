@@ -178,6 +178,19 @@
 - [ ] **Step 4:** README-секция «Менструальный цикл» (2-3 абзаца: модель событий, чем отличается от прежних корзин, что видят врач/тренер).
 - [ ] **Step 5:** Commit `"docs+smoke: cycle tracking acceptance"`. Деплой на сервер — руками владельца (напомнить: новые файлы `cycle_engine.py`, `cycle_ui.py` обязательны к копированию, иначе ImportError).
 
+## Правки по итогам ревью «брата» (2026-10-18, после Tasks 1-4)
+
+1. `report_cycle_line` из T4 переименован/перепроектирован в `status_line(start, length, today, learned=False)` — сам считает день/статус/фазу (handler'ы тоньше). T7 вызывать его.
+2. Новый API в database.py: `correct_cycle_anchor(athlete_id, new_date) -> bool` — ретро-коррекция: стирает start/anchor позже new_date, ставит кэш, снимает menarche_status. В T5 ветки `anchor_custom` и `cyc_anchor_again` при дате раньше кэша вызывают его, иначе `add_cycle_event`.
+3. `add_cycle_event`: будущая дата → False; 'start' пересиливает 'anchor' той же даты, anchor при существующем start того же дня — игнор.
+4. Окно `parse_date_ru` = ровно `AMENORRHEA_DAYS` (90), строка про +7 выше недействительна (спека первее плана).
+5. Флаг источника длины: `athletes.cycle_length_learned INTEGER DEFAULT 0`, обучение ставит 1; T5 при ручной смене длины обнуляет, T6/T7 читают для «(по истории)/(вручную)».
+6. Медиана чётного числа: округление .5 вверх (`(a+b+1)//2`).
+7. `anchor_text(target)` — без today.
+8. `get_cycle_events(types=())` → [] (защита от `IN ()` на старых sqlite).
+9. PRAGMA foreign_keys НЕ включаем глобально — scope creep, риск для существующих вставок на проде; сироты теоретически возможны, accepted.
+10. Миграция после ALTER проверяет колонки через PRAGMA table_info и пишет logger.error при отсутствии (без raise).
+
 ## Self-review checklist (заполнить по факту выполнения)
 
 - [ ] Spec coverage: каждая секция дизайна → задача.

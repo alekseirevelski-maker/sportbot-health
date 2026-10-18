@@ -365,6 +365,16 @@ class Database:
             self.conn.execute("ALTER TABLE athletes ADD COLUMN menarche_status TEXT")
         except Exception:
             pass  # колонка уже есть
+        try:
+            self.conn.execute("ALTER TABLE athletes ADD COLUMN cycle_length_learned INTEGER DEFAULT 0")
+        except Exception:
+            pass  # колонка уже есть
+        # Проверка миграции: проглоченный ALTER (locked/ручная ковырка) иначе уронит
+        # опрос у каждой девушки на первом же get_last_period_start
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(athletes)")}
+        missing = {"last_period_start", "menarche_status", "cycle_length_learned"} - cols
+        if missing:
+            logger.error(f"Миграция цикла не прошла: нет колонок {sorted(missing)} — учёт цикла не будет работать")
         self.conn.commit()
 
     def get_setting(self, key: str, default: str = None) -> str:
@@ -409,14 +419,31 @@ class Database:
                         type: str = "start", source: str = "survey_button") -> bool:
         """Записать событие цикла; повтор того же дня/типа идемпотентен (двойной тап).
 
-        'start'/'anchor' задвигают кэш last_period_start, но никогда не откатывают его назад.
+        Будущая дата отклоняется: день от неё бросал ValueError и вали отчёт по
+        всем девушкам. 'start' пересиливает 'anchor' той же даты (одна дата —
+        одно начало), обратный порядок — anchor игнорируется.
+        'start'/'anchor' задвигают кэш last_period_start, но назад не откатывают
+        (для ретро-коррекции есть correct_cycle_anchor).
         Даты храним ISO-строками — порядковое сравнение работает лексикографически.
         """
+        if event_date > date.today():
+            logger.warning(f"cycle_event: будущая дата {event_date} отклонена (ath #{athlete_id})")
+            return False
         iso = event_date.isoformat()
         try:
+            if type == "anchor":
+                has_start = self.conn.execute(
+                    "SELECT 1 FROM cycle_events WHERE athlete_id=? AND event_date=? AND type='start'",
+                    (athlete_id, iso)).fetchone()
+                if has_start:
+                    return True  # это же начало уже отмечено как 'start'
             self.conn.execute(
                 "INSERT OR IGNORE INTO cycle_events (athlete_id, event_date, type, source) "
                 "VALUES (?, ?, ?, ?)", (athlete_id, iso, type, source))
+            if type == "start":
+                self.conn.execute(
+                    "DELETE FROM cycle_events WHERE athlete_id=? AND event_date=? AND type='anchor'",
+                    (athlete_id, iso))
             if type in ("start", "anchor"):
                 self.conn.execute(
                     "UPDATE athletes SET last_period_start = ? WHERE id = ? "
@@ -426,6 +453,32 @@ class Database:
             return True
         except Exception as e:
             logger.error(f"Add cycle event: {e}")
+            return False
+
+    def correct_cycle_anchor(self, athlete_id: int, new_date: date) -> bool:
+        """Коррекция задним числом: начало было на new_date, а не позже.
+
+        Стирает призрачные события 'start'/'anchor' после new_date (ошибочные тапы),
+        ставит якорь ровно на new_date и снимает menarche_status (раз дата есть —
+        менструация была). Источник истины после коррекции — эта дата.
+        """
+        if new_date > date.today():
+            return False
+        iso = new_date.isoformat()
+        try:
+            self.conn.execute(
+                "DELETE FROM cycle_events WHERE athlete_id = ? AND event_date > ? "
+                "AND type IN ('start','anchor')", (athlete_id, iso))
+            self.conn.execute(
+                "INSERT OR IGNORE INTO cycle_events (athlete_id, event_date, type, source) "
+                "VALUES (?, ?, 'anchor', 'correction')", (athlete_id, iso))
+            self.conn.execute(
+                "UPDATE athletes SET last_period_start = ?, menarche_status = NULL WHERE id = ?",
+                (iso, athlete_id))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Correct cycle anchor: {e}")
             return False
 
     def get_last_period_start(self, athlete_id: int) -> Optional[date]:
@@ -440,6 +493,8 @@ class Database:
     def get_cycle_events(self, athlete_id: int,
                          types: tuple = ("start", "anchor")) -> List[date]:
         """Даты событий цикла по возрастанию (обучение длины, экран «Мой цикл»)."""
+        if not types:
+            return []  # пустой кортеж -> "IN ()" на старых sqlite синтаксическая ошибка
         placeholders = ",".join("?" * len(types))
         rows = self.conn.execute(
             f"SELECT event_date FROM cycle_events WHERE athlete_id = ? "
@@ -718,16 +773,16 @@ class Database:
             prev = d
         if len(intervals) < 2:
             return None
-        # медиана устойчива к выбросам (при чётном числе — среднее центральных)
+        # медиана устойчива к выбросам (при чётном числе — .5 округляем вверх, предсказуемо)
         s = sorted(intervals)
         n = len(s)
         if n % 2 == 1:
             median = s[n // 2]
         else:
-            median = int(round((s[n // 2 - 1] + s[n // 2]) / 2))
+            median = (s[n // 2 - 1] + s[n // 2] + 1) // 2
         if 21 <= median <= 35:  # норма длины цикла (CYCLE_LENGTH_NORM_MIN/MAX из cycle_medicine)
             self.conn.execute(
-                "UPDATE athletes SET cycle_length_default = ? WHERE id = ?",
+                "UPDATE athletes SET cycle_length_default = ?, cycle_length_learned = 1 WHERE id = ?",
                 (median, athlete_id)
             )
             self.conn.commit()

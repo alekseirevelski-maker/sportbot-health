@@ -3,7 +3,7 @@
 
 Из этих событий считаются день цикла и обучение длины (Task 3).
 """
-from datetime import date
+from datetime import date, timedelta
 
 from database import Database
 
@@ -70,3 +70,66 @@ def test_menarche_status_roundtrip(tmp_path):
     assert a["menarche_status"] == "pre"
     db.set_menarche_status(aid, None)
     assert db.get_athlete_by_telegram_id(888001)["menarche_status"] is None
+
+
+# ---------- ревю «брата» 2026-10-18: блокеры/риски ----------
+
+def test_future_event_rejected(tmp_path):
+    """Блокер: будущая дата не должна задвигать кэш в будущее (иначе cycle_day
+    бросает ValueError и валит весь отчёт по девушкам)."""
+    from datetime import date as _d
+    db = _db(tmp_path)
+    aid = _athlete(db)
+    assert db.add_cycle_event(aid, _d.today() + timedelta(days=3)) is False
+    assert db.get_last_period_start(aid) is None
+
+
+def test_correct_anchor_removes_phantoms(tmp_path):
+    """Блокер: коррекция задним числом — истина в новой дате.
+    Тап «Да» 18.10 (ошибочный), коррекция на 15.10: кэш=15.10, призрака 18.10 нет."""
+    db = _db(tmp_path)
+    aid = _athlete(db)
+    db.add_cycle_event(aid, date(2026, 10, 18))          # ложный тап
+    db.add_cycle_event(aid, date(2026, 9, 12))           # реальный предыдущий старт
+    assert db.correct_cycle_anchor(aid, date(2026, 10, 15)) is True
+    assert db.get_last_period_start(aid) == date(2026, 10, 15)
+    assert db.get_cycle_events(aid) == [date(2026, 9, 12), date(2026, 10, 15)]
+
+
+def test_correct_anchor_future_rejected(tmp_path):
+    db = _db(tmp_path)
+    aid = _athlete(db)
+    db.add_cycle_event(aid, date(2026, 10, 10))
+    from datetime import date as _d
+    assert db.correct_cycle_anchor(aid, _d.today() + timedelta(days=1)) is False
+    assert db.get_last_period_start(aid) == date(2026, 10, 10)  # как было
+
+
+def test_start_supersedes_same_day_anchor(tmp_path):
+    """Риск: якорь «Сегодня» + тап «Да» в тот же день — одно событие, не лесенка-дубль."""
+    db = _db(tmp_path)
+    aid = _athlete(db)
+    db.add_cycle_event(aid, date(2026, 10, 10), type="anchor")
+    db.add_cycle_event(aid, date(2026, 10, 10), type="start")   # пересиливает
+    assert db.get_cycle_events(aid) == [date(2026, 10, 10)]
+    db.add_cycle_event(aid, date(2026, 10, 10), type="anchor")  # обратный порядок — игнор
+    assert db.get_cycle_events(aid) == [date(2026, 10, 10)]
+
+
+def test_get_cycle_events_empty_types_guard(tmp_path):
+    """Риск: types=() не должен ронять SQL IN ()."""
+    db = _db(tmp_path)
+    aid = _athlete(db)
+    db.add_cycle_event(aid, date(2026, 10, 1))
+    assert db.get_cycle_events(aid, types=()) == []
+
+
+def test_length_learned_flag(tmp_path):
+    """Мелочь №5: у длины должен быть источник — флаг после обучения, 0 до/при ручной установке."""
+    db = _db(tmp_path)
+    aid = _athlete(db)
+    assert db.get_athlete_by_telegram_id(888001)["cycle_length_learned"] == 0
+    for d in (date(2026, 5, 1), date(2026, 5, 27), date(2026, 6, 26)):
+        db.add_cycle_event(aid, d)
+    assert db.update_cycle_length_from_history(aid) == 28
+    assert db.get_athlete_by_telegram_id(888001)["cycle_length_learned"] == 1
