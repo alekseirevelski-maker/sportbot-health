@@ -1690,6 +1690,19 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                 if len(dates_present) < 2:
                     alerts.append(f"⚪ *{name}* ({team}): нет опроса за 2+ дня")
 
+            # Паттерны 6-7: цикл — задержка >7 дн. и аменорея ≥90 дн. (FLOW-модель).
+            # Дедуп: повтор не чаще раза в 7 дней на девушку/тип (bot_settings).
+            from cycle_ui import cycle_alert_lines
+            last_sent = {}
+            for a in athletes:
+                for kind in ("delay", "amenorrhea"):
+                    v = self.db.get_setting(f"cycle_alert_{a['id']}_{kind}")
+                    if v:
+                        last_sent[f"cycle_alert_{a['id']}_{kind}"] = v
+            for key, cyc_line in cycle_alert_lines(athletes, date.today(), last_sent):
+                alerts.append(cyc_line)
+                self.db.set_setting(key, date.today().isoformat())
+
             # Отправка алертов врачам
             if alerts:
                 alert_text = "🚨 *Trend-алерты за сегодня:*\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"

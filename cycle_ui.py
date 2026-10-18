@@ -211,3 +211,58 @@ def status_line(start: Optional[date], length: int, today: date,
         line += f" · ⚠️ задержка {delay} дн."
     line += f" · цикл {length} дн. ({'по истории' if learned else 'вручную'})"
     return line
+
+
+def _as_date(v) -> Optional[date]:
+    """Колонки БД переживают и ISO-строку, и date — нормализуем в одном месте."""
+    if not v:
+        return None
+    return date.fromisoformat(str(v)) if isinstance(v, str) else v
+
+
+def athlete_cycle_line(a: dict, today: date) -> Optional[str]:
+    """Циклическая строка по строке get_all_athletes (для отчётов), None если нечего."""
+    if a.get("gender") != "female":
+        return None
+    start = _as_date(a.get("last_period_start"))
+    if not start:
+        return None
+    return status_line(start, a.get("cycle_length_default") or 28, today,
+                       bool(a.get("cycle_length_learned")))
+
+
+ALERT_REPEAT_DAYS = 7  # повтор алерта врачу — не чаще раза в неделю на девушку/тип
+
+
+def cycle_alert_lines(athletes: List[dict], today: date,
+                      last_sent: dict) -> List[Tuple[str, str]]:
+    """Алерты «задержка» (>7 дн.) и «аменорея» (≥90 дн.) для trend-дайджеста.
+
+    last_sent: {ключ: iso-дата последней отправки} — дедуп ALERT_REPEAT_DAYS.
+    Возвращает [(ключ_для_сохранения, строка)]; статус no_anchor/pre/skip не участвуют.
+    """
+    out = []
+    for a in athletes:
+        if a.get("gender") != "female":
+            continue
+        start = _as_date(a.get("last_period_start"))
+        if not start:
+            continue
+        cl = a.get("cycle_length_default") or 28
+        st = cycle_status(start, cl, today)
+        if st not in ("delay", "amenorrhea"):
+            continue
+        key = f"cycle_alert_{a['id']}_{st}"
+        prev = _as_date(last_sent.get(key))
+        if prev is not None and (today - prev).days < ALERT_REPEAT_DAYS:
+            continue
+        name = a.get("full_name") or f"#{a['id']}"
+        team = a.get("team", "?")
+        if st == "amenorrhea":
+            line = (f"🚫 *{name}* ({team}): {(today - start).days} дн. "
+                    "без менструации — RED-S, нужен осмотр")
+        else:
+            line = (f"⚠️ *{name}* ({team}): задержка {delay_days(start, cl, today)} дн. "
+                    f"(цикл {cl} дн.)")
+        out.append((key, line))
+    return out

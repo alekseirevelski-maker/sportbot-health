@@ -4,7 +4,16 @@
 """
 
 import logging
+from datetime import date
 from typing import TYPE_CHECKING
+from telegram import InlineKeyboardButton
+from config import AGE_GROUPS, ADMIN_IDS, REMINDER_HOUR_DEFAULT, REMINDER_MINUTE_DEFAULT
+from database import TEAMS
+
+ADMIN_TELEGRAM_IDS = ADMIN_IDS
+REMINDER_HOUR = REMINDER_HOUR_DEFAULT
+REMINDER_MINUTE = REMINDER_MINUTE_DEFAULT
+REMINDER_TZ = "Asia/Yekaterinburg"
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +278,7 @@ class AdminMixin:
             else:
                 not_passed.append(a)
 
+        from cycle_ui import athlete_cycle_line
         text = (
             f"📅 *Отчёт за {today.strftime('%d.%m.%Y')}*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -276,11 +286,17 @@ class AdminMixin:
         )
         for a in passed:
             text += f"  • {a['full_name']} ({a['team']})\n"
+            cyc = athlete_cycle_line(a, today)
+            if cyc:
+                text += f"      🌸 {cyc}\n"
 
         if not_passed:
             text += f"\n❌ *Не прошли ({len(not_passed)}):*\n"
             for a in not_passed:
                 text += f"  • {a['full_name']} ({a['team']})\n"
+                cyc = athlete_cycle_line(a, today)
+                if cyc:
+                    text += f"      🌸 {cyc}\n"
 
         text += f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         text += f"Итого: {len(passed)}/{len(athletes)} прошли"
@@ -657,6 +673,7 @@ class AdminMixin:
 
     async def _send_weekly_coach_summary(self, context):
         """Понедельничная сводка по командам — каждому тренеру."""
+        from bot import TESTING
         if TESTING:
             logger.info("TESTING MODE — сводки тренерам не отправляются")
             return
@@ -823,6 +840,12 @@ class AdminMixin:
                 flags.append(f"💊 Обезболивающие: {s['analgesics']}")
             if s["illness"]:
                 flags.append(f"🤒 Болезнь: {s['illness']}")
+            # Цикл (дизайн: тренер видит): задержки/аменорея по девушкам команды
+            from cycle_ui import cycle_alert_lines
+            girls = [a for a in self.db.get_all_athletes()
+                     if a.get("team") == team and a.get("gender") == "female"]
+            for _key, cyc_line in cycle_alert_lines(girls, date.today(), {}):
+                flags.append(cyc_line)
             lines.append("🚨 *Требуют внимания:*\n  • " + "\n  • ".join(flags) if flags
                          else "✅ За неделю всё спокойно")
         return "\n".join(lines)
