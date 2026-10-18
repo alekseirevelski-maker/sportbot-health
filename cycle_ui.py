@@ -164,6 +164,35 @@ def cycle_saved_text(res: dict) -> str:
     return line
 
 
+def build_cycle_display(events: List[date], stored: List[dict], today: date
+                        ) -> List[Tuple[str, Optional[int], str]]:
+    """Лесенка «Мой цикл» [(«дд.мм», день, источник)] по возрастанию дат.
+
+    Даты с якоря — вычисляем от ближайшего предшествующего события (без корзин);
+    даты до первого события — старые stored-записи как есть ('stored').
+    так прошлое не смешивается с вычисляемым настоящим (Review Focus №4).
+    """
+    if not events:
+        return []
+    first = min(events)
+    out = []
+    for e in stored:
+        raw = e.get("survey_date")
+        try:
+            d = date.fromisoformat(str(raw)) if isinstance(raw, str) else raw
+        except ValueError:
+            continue
+        if d > today:  # защитник: опросы «из будущего» не показываем
+            continue
+        if d < first:
+            out.append((d, e.get("cycle_day"), "stored"))
+        else:
+            anchor = max(x for x in events if x <= d)
+            out.append((d, cycle_day(anchor, d), "computed"))
+    out.sort(key=lambda t: t[0])
+    return [(d.strftime("%d.%m"), day, kind) for d, day, kind in out]
+
+
 def status_line(start: Optional[date], length: int, today: date,
                 learned: bool = False) -> Optional[str]:
     """Строка цикла для отчётов (врач/тренер/дайджест).

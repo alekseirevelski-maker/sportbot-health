@@ -892,36 +892,21 @@ class AthleteMixin:
 
 
     async def show_cycle_info(self, update, ctx):
-        """Показать информацию о текущей фазе цикла с научной базой."""
+        """«Мой цикл»: текущий день/фаза от якоря-события, прогноз, лесенка
+        без корзин (старые записи только до первого якоря)."""
         q = update.callback_query
         await q.answer()
         athlete = self.db.get_athlete_by_telegram_id(q.from_user.id)
         if not athlete:
             return
 
-        # Берём последний день цикла из опросов
-        cycle_history = self.db.get_cycle_history(athlete["id"], 30)
-        if not cycle_history:
-            await q.edit_message_text(
-                "📅 *Менструальный цикл*\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                "Нет данных о цикле. Заполняй день цикла в ежедневном опросе, и здесь появится информация.",
-                reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]]), parse_mode="Markdown"
-            )
-            return
-
-        last = cycle_history[0]
-        cd = last.get("cycle_day")
-        cl = last.get("cycle_length") or athlete.get("cycle_length_default", CYCLE_LENGTH_MEDIAN)
-
-        if cd is None:
-            await q.edit_message_text(
-                "📅 Ещё нет данных о дне цикла. Укажи его в опросе.",
-                reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]]), parse_mode="Markdown"
-            )
-            return
-
-        # Используем новый модуль cycle_medicine для детальной информации
-        info = get_cycle_phase_info(cd, cl)
+        from datetime import date as _d
+        from cycle_ui import build_cycle_display, status_line
+        today = _d.today()
+        start = self.db.get_last_period_start(athlete["id"])
+        events = self.db.get_cycle_events(athlete["id"])
+        cl = athlete.get("cycle_length_default") or CYCLE_LENGTH_MEDIAN
+        learned = bool(athlete.get("cycle_length_learned"))
 
         text = (
             f"📅 *Менструальный цикл*\n"
@@ -929,33 +914,67 @@ class AthleteMixin:
             f"👤 {athlete['full_name']}\n"
             f"📋 {athlete['age_group']}\n\n"
         )
+        buttons = [[(f"🗓 Отметить начало", "cyc_set_anchor")]]
 
+        if start is None:
+            mstatus = athlete.get("menarche_status")
+            if mstatus == "pre":
+                text += "Отмечено «пока не было». Как начнутся — нажми «Отметить начало» " \
+                        "или ответь на вопрос в опросе.\n"
+            else:
+                text += "Нет даты начала — бот считает день цикла от события «месячные " \
+                        "начались». Нажми «Отметить начало» или ответь на один вопрос в опросе.\n"
+            buttons.append([(f"🔙 Назад", "main_menu")])
+            await q.edit_message_text(text, reply_markup=self.kb(buttons),
+                                      parse_mode="Markdown")
+            return
+
+        line = status_line(start, cl, today, learned)
+        if line:
+            text += f"{line}\n\n"
+
+        # База знаний по текущей фазе (если день в пределах цикла)
+        from cycle_engine import cycle_day
+        info = get_cycle_phase_info(cycle_day(start, today), cl)
         if info:
-            text += info["text"]
-        else:
-            text += "⚠️ Не удалось определить фазу.\n\n"
+            text += info["text"] + "\n"
 
-        text += "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        text += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
 
         # Возрастные рекомендации
         age_info = AGE_SPECIFIC.get(athlete.get("age_group", ""))
         if age_info:
             text += f"\n*Для {athlete['age_group']}:*\n{age_info.training_note}\n\n🚩 {age_info.concerns}"
 
-        # История последних дней
-        if len(cycle_history) > 1:
+        # Лесенка: вычисляемые дни + stored до якоря (RF №4)
+        stored = self.db.get_cycle_history(athlete["id"], 60)
+        rows = build_cycle_display(events, stored, today)
+        if rows:
             text += "\n*Последние записи:*\n"
-            for entry in cycle_history[:7]:
-                d = entry.get("survey_date", "?")
-                day = entry.get("cycle_day", "—")
-                ph = entry.get("cycle_phase", "—")
-                text += f"  📅 {d}: день {day} ({ph})\n"
+            for d_label, day, kind in rows[-7:]:
+                note = " (до якоря)" if kind == "stored" else ""
+                text += f"  📅 {d_label}: день {day}{note}\n"
 
+        buttons.append([(f"🔙 Назад", "main_menu")])
         await q.edit_message_text(
             text,
-            reply_markup=self.kb([[(f"🔙 Назад", "main_menu")]]),
+            reply_markup=self.kb(buttons),
             parse_mode="Markdown"
         )
+
+    async def set_anchor_manual_start(self, update, ctx):
+        """Кнопка «Отметить начало» вне опроса (экран «Мой цикл») → шаг ввода даты."""
+        q = update.callback_query
+        await q.answer()
+        athlete = self.db.get_athlete_by_telegram_id(q.from_user.id)
+        if not athlete:
+            return
+        state = self.get_state(q.from_user.id)
+        state["step"] = "survey_anchor_date"
+        await q.edit_message_text(
+            "🗓 Когда начались месячные? Введи дату ДД.ММ (например 05.10).\n"
+            "Можно задним числом — день цикла пересчитается от новой даты.",
+            parse_mode="Markdown")
 
 
     def _cycle_ctx(self, update):
@@ -1069,12 +1088,15 @@ class AthleteMixin:
             await self._ask_complaints(update, ctx)
 
     async def _anchor_date_text(self, update, ctx):
-        """Текстовый шаг: девушка ввела дату якоря/коррекции «ДД.ММ»."""
+        """Текстовый шаг: девушка ввела дату якоря/коррекции «ДД.ММ».
+        Работает и из опроса, и с экрана «Мой цикл» (athlete тогда из БД)."""
         user_id = update.effective_user.id
         state = self.get_state(user_id)
-        athlete = state.get("data", {}).get("athlete")
+        in_survey = bool(state.get("data", {}).get("athlete"))
+        athlete = (state["data"]["athlete"] if in_survey
+                   else self.db.get_athlete_by_telegram_id(user_id))
         if not athlete:
-            await self._broken_survey_reply(None, update)
+            await update.message.reply_text("❌ Не нашла твою анкету — напиши врачу.")
             return
 
         from datetime import date as _d
@@ -1095,7 +1117,7 @@ class AthleteMixin:
 
         ok = await self._save_cycle_anchor(_MsgAsQ(update.message), state, athlete,
                                            target, "manual_date")
-        if ok:
+        if ok and in_survey:
             await self._ask_complaints(update, ctx)
 
     async def ask_cycle_day(self, update, ctx):

@@ -1420,6 +1420,8 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                 await self._cycle_length_chosen(update, ctx)
             elif d.startswith("anchor_"):
                 await self.set_cycle_anchor(update, ctx)
+            elif d == "cyc_set_anchor":
+                await self.set_anchor_manual_start(update, ctx)
             elif d.startswith("cyc_"):
                 await self.set_cycle_daily(update, ctx)
             elif d == "my_cycle":
