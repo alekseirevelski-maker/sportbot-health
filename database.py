@@ -702,22 +702,15 @@ class Database:
         return True
 
     def update_cycle_length_from_history(self, athlete_id: int) -> Optional[int]:
-        """Персонализация длины цикла: медиана интервалов между отметками «день 1»
-        (начало месячных). Обновляет cycle_length_default, если медиана в норме 21-35.
-        Возвращает новую длину или None (недостаточно данных / вне нормы)."""
-        rows = self.conn.execute("""
-            SELECT survey_date FROM daily_wellness
-            WHERE athlete_id = ? AND cycle_day = 1
-            ORDER BY survey_date
-        """, (athlete_id,)).fetchall()
-        if len(rows) < 3:  # нужно минимум 3 начала цикла → 2 интервала
+        """Персонализация длины цикла: медиана интервалов между событиями начала
+        месячных (cycle_events). Обновляет cycle_length_default, если медиана в
+        норме 21-35. Возвращает новую длину или None (недостаточно данных / вне нормы)."""
+        dates = self.get_cycle_events(athlete_id)  # start/anchor, по возрастанию
+        if len(dates) < 3:  # нужно минимум 3 начала цикла → 2 интервала
             return None
         intervals = []
         prev = None
-        for r in rows:
-            d = r["survey_date"]
-            if isinstance(d, str):
-                d = date.fromisoformat(d)
+        for d in dates:
             if prev is not None:
                 gap = (d - prev).days
                 if gap >= 15 and gap <= 45:  # отсекаем пропуски/дубли
