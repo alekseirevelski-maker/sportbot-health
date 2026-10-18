@@ -5,6 +5,9 @@
 
 import logging
 from typing import TYPE_CHECKING
+from telegram import InlineKeyboardButton
+from config import SIMPLE_PROTOCOLS, MOTIVATIONAL_MESSAGES, HR_NORMS
+from gamification import get_motivation_key
 
 logger = logging.getLogger(__name__)
 
@@ -290,12 +293,21 @@ class SurveyMixin:
                 await update.message.reply_text(text, reply_markup=buttons, parse_mode="Markdown")
             return
 
-        # Если девушка → спросить длину цикла (если не сохранена) или день цикла
+        # Девушка: пол → длина (если нет) → якорь/ежедневный тап по FLOW-модели
         if gender == "female":
             if not cycle_length:
                 await self._ask_cycle_length(update, ctx)
-            else:
+                return
+            from cycle_engine import cycle_step_for
+            start = self.db.get_last_period_start(athlete["id"])
+            mstatus = (fresh or {}).get("menarche_status")
+            step = cycle_step_for(gender, start, mstatus)
+            if step == "anchor":
+                await self.ask_cycle_anchor(update, ctx)
+            elif step == "daily":
                 await self.ask_cycle_day(update, ctx)
+            else:  # 'pre' / 'skip' — не nag-ить, цикл обходится
+                await self._ask_complaints(update, ctx)
         else:
             await self._ask_complaints(update, ctx)
 
@@ -328,6 +340,7 @@ class SurveyMixin:
 
 
     async def _finish_survey(self, source, user_id, state):
+        from bot import get_score_emoji, score_bar, get_rank
         data = state["data"]
         athlete = data.get("athlete")
         if not athlete:
@@ -376,10 +389,9 @@ class SurveyMixin:
         streak = athlete.get("survey_streak", 0) if athlete else 0
 
         motivation = ""
-        if streak >= 30: motivation = MOTIVATIONAL_MESSAGES["streak_30"]
-        elif streak >= 14: motivation = MOTIVATIONAL_MESSAGES["streak_14"]
-        elif streak >= 7: motivation = MOTIVATIONAL_MESSAGES["streak_7"]
-        elif streak >= 3: motivation = MOTIVATIONAL_MESSAGES["streak_3"]
+        mkey = get_motivation_key(streak)
+        if mkey:
+            motivation = MOTIVATIONAL_MESSAGES[mkey]
 
         text = (
             f"✅ *Опрос завершён!*\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -406,7 +418,6 @@ class SurveyMixin:
             text += f"\n⚠️ *Это не медицинское заключение.* При сомнениях обратись к врачу лично."
 
         buttons = [
-            [(f"📤 Загрузить данные с весов", "scale_upload_start")],
             [(f"🏠 Главное меню", "main_menu")],
         ]
 
@@ -682,7 +693,7 @@ class SurveyMixin:
                         from datetime import datetime as _dt
                         if qd.get("completed_at"):
                             q_dt = _dt.fromisoformat(str(qd["completed_at"]).replace("Z", "+00:00"))
-                            if (datetime.now() - q_dt.replace(tzinfo=None)).days > 120:
+                            if (_dt.now() - q_dt.replace(tzinfo=None)).days > 120:
                                 q_stale = True
                     except Exception:
                         pass

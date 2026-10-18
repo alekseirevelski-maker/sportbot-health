@@ -143,16 +143,10 @@ def trend_arrow(current, previous, invert=False):
     return f"↑ +{diff:.1f}" if diff > 0 else f"↓ {diff:.1f}"
 
 
-def get_rank(streak):
-    if streak >= 30:
-        return "🥇 Золото"
-    elif streak >= 14:
-        return "🥈 Серебро"
-    elif streak >= 7:
-        return "🥉 Бронза"
-    elif streak >= 3:
-        return "⭐ Старт"
-    return "🌱 Новичок"
+from gamification import (  # noqa: F401 — get_rank реэкспортируется: старый код делает `from bot import get_rank`
+    get_rank,
+    get_rank_plain,
+)
 
 
 def get_score_emoji(score):
@@ -674,6 +668,33 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                     first_name=_reg_fn
                 )
 
+            if not ok:
+                existing = self.db.get_athlete_by_telegram_id(user_id)
+                if existing:
+                    await update.message.reply_text(
+                        f"✅ *Добро пожаловать снова!*\n\n👤 {existing['full_name']}\n📋 {existing['age_group']}\n🏀 {existing.get('team', '?')}\n\nВы уже зарегистрированы 🏀",
+                        reply_markup=self.kb([[(f"🏠 Главное меню", "main_menu")]]), parse_mode="Markdown"
+                    )
+                else:
+                    await update.message.reply_text("❌ Ошибка регистрации. Попробуйте позже.", parse_mode="Markdown")
+                self.clear_state(user_id)
+                return
+
+            self.clear_state(user_id)
+            athlete_obj = self.db.get_athlete_by_telegram_id(user_id)
+            has_q = self.db.has_questionnaire(athlete_obj["id"]) if athlete_obj else False
+            if not has_q:
+                await update.message.reply_text(
+                    f"✅ *Регистрация завершена!*\n\n👤 {name}\n📋 {state['data']['age_group']}\n🏀 {state['data'].get('team', '?')}\n\n📋 *Теперь заполни анкету — это важно для врача!*",
+                    reply_markup=self.kb([[(f"📋 Пройти анкету", "questionnaire")]]), parse_mode="Markdown"
+                )
+            else:
+                await update.message.reply_text(
+                    f"✅ *Регистрация завершена!*\n\n👤 {name}\n📋 {state['data']['age_group']}\n🏀 {state['data'].get('team', '?')}\n\nДобро пожаловать! 🏀",
+                    reply_markup=self.kb([[(f"🏠 Главное меню", "main_menu")]]), parse_mode="Markdown"
+                )
+            return
+
         # Регистрация: кастомная команда (для клубов без команд)
         elif step == "reg_team_custom":
             team = text.strip()
@@ -911,7 +932,7 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
             await self.ask_cycle_day(update, ctx)
             return
 
-        # День цикла (ввод числа)
+        # День цикла (ручное исправление числа: 1..длина+30)
         if step == "survey_cycle":
             athlete = state.get("data", {}).get("athlete")
             if not athlete:
@@ -922,21 +943,20 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                     parse_mode="Markdown"
                 )
                 return
-            try:
-                cd = int(text)
-                cl = athlete.get("cycle_length_default", 28)
-                if not (1 <= cd <= cl):
-                    raise ValueError
-            except ValueError:
-                await update.message.reply_text(f"❌ Введи число от 1 до {athlete.get('cycle_length_default', 28)}:")
+            from cycle_engine import parse_day_input
+            from cycle_ui import values_for_day
+            cl = athlete.get("cycle_length_default") or 28
+            cd = parse_day_input(text, cl)
+            if cd is None:
+                await update.message.reply_text(f"❌ Введи число от 1 до {cl + 30}:")
                 return
-
-            from cycle_medicine import get_cycle_phase
-            phase_key, phase_info = get_cycle_phase(cd, athlete.get("cycle_length_default", 28))
-            state["data"]["cycle_day"] = cd
-            state["data"]["cycle_length"] = athlete.get("cycle_length_default", 28)
-            state["data"]["cycle_phase"] = phase_info.name_ru if phase_info else ""
+            state["data"].update(values_for_day(cd, cl))
             await self._ask_complaints(update, ctx)
+            return
+
+        # Дата якоря / ретро-коррекции (ДД.ММ)
+        if step == "survey_anchor_date":
+            await self._anchor_date_text(update, ctx)
             return
 
         # Жалобы (ввод текста)
@@ -1396,12 +1416,12 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                 await self.save_gender(update, ctx)
             elif d == "cycle_len_custom":
                 await self._ask_cycle_length_custom(update, ctx)
-            elif d == "cycle_custom":
-                await self._ask_cycle_day_custom(update, ctx)
             elif d.startswith("cycle_len_"):
                 await self._cycle_length_chosen(update, ctx)
-            elif d.startswith("cycle_"):
-                await self.set_cycle_day(update, ctx)
+            elif d.startswith("anchor_"):
+                await self.set_cycle_anchor(update, ctx)
+            elif d.startswith("cyc_"):
+                await self.set_cycle_daily(update, ctx)
             elif d == "my_cycle":
                 await self.show_cycle_info(update, ctx)
             elif d == "update_weight":
@@ -1714,14 +1734,7 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                 pain = self.db.get_week_pain_summary(a["id"], 7)
                 from weekly_report import generate_weekly_report
                 # ранг без эмодзи (PIL не рисует цветные эмодзи)
-                _rank = {
-                    30: "Золото", 14: "Серебро", 7: "Бронза", 3: "Старт",
-                }
-                plain_rank = "Новичок"
-                for th, name in sorted(_rank.items(), reverse=True):
-                    if a.get("survey_streak", 0) >= th:
-                        plain_rank = name
-                        break
+                plain_rank = get_rank_plain(a.get("survey_streak", 0))
                 path = generate_weekly_report(
                     full_name=a["full_name"],
                     age_group=a.get("age_group", "?"),

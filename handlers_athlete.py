@@ -4,8 +4,11 @@
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from typing import TYPE_CHECKING
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from config import HR_NORMS, AGE_GROUP_YEARS, BMI_PERCENTILES
+from cycle_medicine import CYCLE_LENGTH_MEDIAN, get_cycle_phase_info, AGE_SPECIFIC
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +20,7 @@ class AthleteMixin:
     """Миксин для athlete."""
 
     async def show_main_menu(self, update, ctx):
+        from bot import get_rank, score_bar
         user = update.effective_user
 
         # Тренер — админ своей команды, опрос не проходит
@@ -137,6 +141,7 @@ class AthleteMixin:
 
 
     async def show_profile(self, update, ctx):
+        from bot import get_rank, score_bar, trend_arrow
         q = update.callback_query
         await q.answer()
         athlete = self.db.get_athlete_by_telegram_id(q.from_user.id)
@@ -404,6 +409,7 @@ class AthleteMixin:
 
 
     async def show_charts(self, update, ctx):
+        from bot import sparkline, sparkline_colored, get_score_emoji
         q = update.callback_query
         await q.answer()
         athlete = self.db.get_athlete_by_telegram_id(q.from_user.id)
@@ -586,6 +592,7 @@ class AthleteMixin:
 
 
     async def show_achievements(self, update, ctx):
+        from gamification import get_rank, STREAK_ACHIEVEMENTS
         q = update.callback_query
         await q.answer()
         athlete = self.db.get_athlete_by_telegram_id(q.from_user.id)
@@ -595,11 +602,7 @@ class AthleteMixin:
         streak = athlete.get("survey_streak", 0)
         total = athlete.get("total_surveys", 0)
 
-        checks = [
-            (1, "🌱 Первая запись"), (3, "🔥 Огненная серия"),
-            (7, "⭐ Неделя без пропусков"), (14, "🏆 Две недели!"),
-            (30, "💎 Месяц идеала!"),
-        ]
+        checks = STREAK_ACHIEVEMENTS
 
         unlocked, locked = [], []
         for th, name in checks:
@@ -955,8 +958,8 @@ class AthleteMixin:
         )
 
 
-    async def ask_cycle_day(self, update, ctx):
-        """Спрашиваем день цикла у девушек после опроса."""
+    def _cycle_ctx(self, update):
+        """Общий сбор контекста шага цикла: (callback_query|None, user_id, state, athlete)."""
         q = update.callback_query if hasattr(update, 'callback_query') and update.callback_query else None
         if update.effective_user:
             user_id = update.effective_user.id
@@ -965,99 +968,199 @@ class AthleteMixin:
         else:
             user_id = None
         if not user_id:
-            return
+            return None, None, None, None
         state = self.get_state(user_id)
         athlete = state.get("data", {}).get("athlete")
-        if not athlete:
-            return
+        return q, user_id, state, athlete
 
-        state["step"] = "survey_cycle"
-
-        # Берём последний cycle_day и длину цикла
-        history = self.db.get_cycle_history(athlete["id"], 60)
-        last_day = history[0]["cycle_day"] if history else None
-        cl = athlete.get("cycle_length_default", 28)
-
-        # Подсказка по фазе
-        from cycle_medicine import get_cycle_phase_info
-        next_day = (last_day + 1) if last_day else 1
-        if next_day > cl:
-            next_day = 1
-        phase_info = get_cycle_phase_info(next_day, cl)
-        phase_text = f" → предполагается {phase_info['phase'].name_ru.lower()}" if phase_info else ""
-
-        hint = f"\n\n💡 Предп. день: {next_day}{phase_text}" if last_day else ""
-
-        buttons = [
-            [(f"🩸 1-5", "cycle_1"), (f"6-10", "cycle_6")],
-            [(f"11-15", "cycle_11"), (f"16-20", "cycle_16")],
-            [(f"21-25", "cycle_21"), (f"26+", "cycle_26")],
-            [(f"✏️ Ввести число", "cycle_custom"), (f"❌ Нет данных", "cycle_none")],
-        ]
-
-        text = (
-            f"📅 *День цикла* (цикл ~{cl} дн.){hint}\n\n"
-            f"Какой сегодня день цикла?\n\n"
-            f"*Как посчитать:* день 1 — это первый день месячных. "
-            f"Сегодняшний день = сколько дней прошло с их начала.\n"
-            f"*Пример:* месячные начались в понедельник, сегодня среда — значит день 3.\n\n"
-            f"Если ещё не ведёшь дневник — просто выбери примерный день или нажми «Нет данных»."
-        )
-
+    async def _render_cycle_step(self, q, update, text, buttons):
+        """Показать шаг цикла: отредадовать callback-сообщение или ответить сообщением."""
         if q:
             await q.edit_message_text(text, reply_markup=self.kb(buttons), parse_mode="Markdown")
         elif update.message:
             await update.message.reply_text(text, reply_markup=self.kb(buttons), parse_mode="Markdown")
 
+    async def _broken_survey_reply(self, q, update):
+        """Потеря состояния опроса (ребут бота посреди шага)."""
+        text = "❌ *Опрос прерван* (возможно бот перезагружался).\n\nХотите начать заново?"
+        kb = self.kb([[(f"🔄 Пройти опрос", "do_survey")],
+                      [(f"🏠 Главное меню", "main_menu")]])
+        if q:
+            await q.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+        elif update.message:
+            await update.message.reply_text(text, reply_markup=kb, parse_mode="Markdown")
 
-    async def _ask_cycle_day_custom(self, update, ctx):
-        """Запросить день цикла ручным вводом числа (кнопка «Ввести число»)."""
+    async def ask_cycle_anchor(self, update, ctx):
+        """Одноразовый вопрос: когда начались последние месячные (FLOW-модель).
+        Больше формат «выбери день корзинкой» не возвращается."""
+        q, user_id, state, athlete = self._cycle_ctx(update)
+        if not athlete:
+            return
+        if q:
+            await q.answer()
+        state["step"] = "survey_anchor"
+
+        from datetime import date as _d
+        from cycle_ui import anchor_buttons
+        today = _d.today()
+        text = (
+            "🌸 *Цикл: новый формат*\n\n"
+            "Больше не нужно каждый день считать день цикла — бот будет считать сам. "
+            "Нужно один раз сказать, когда начались последние месячные.\n\n"
+            "💡 Дальше — один вопрос в день: «начались сегодня?» (одна кнопка).\n\n"
+            "Когда начались последние месячные?"
+        )
+        await self._render_cycle_step(q, update, text, anchor_buttons(today))
+
+    async def _save_cycle_anchor(self, q, state, athlete, target, source):
+        """Общий путь: сохранить якорь (или коррекцию), эхо, переход к жалобам."""
+        from datetime import date as _d
+        from cycle_ui import apply_anchor, cycle_saved_text, anchor_text
+        today = _d.today()
+        cl = athlete.get("cycle_length_default") or 28
+        res = apply_anchor(self.db, athlete["id"], target, today, cl, source=source)
+        if not res:
+            await q.edit_message_text(
+                "❌ Не удалось сохранить дату. Попробуй ещё раз или введи ДД.ММ.")
+            return False
+        self._apply_anchor_to_state(state, athlete, res)
+        note = f"✅ Записано: *{anchor_text(target)}*.\n\n" if source == "manual_date" else ""
+        await q.edit_message_text(note + cycle_saved_text(res), parse_mode="Markdown")
+        return True
+
+    def _apply_anchor_to_state(self, state, athlete, res):
+        """Вычисленные день/фаза — в данные опроса (stored-совместимость Excel)."""
+        state["data"]["cycle_day"] = res["cycle_day"]
+        state["data"]["cycle_length"] = res["length"]
+        state["data"]["cycle_phase"] = res["cycle_phase"]
+        if res.get("learned"):
+            athlete["cycle_length_default"] = res["learned"]
+            athlete["cycle_length_learned"] = 1
+        if res.get("start"):
+            athlete["last_period_start"] = res["start"]
+
+    async def set_cycle_anchor(self, update, ctx):
+        """Ответ на одноразовый якорь: кнопки anchor_0..5 / custom / pre / skip."""
         q = update.callback_query
         await q.answer()
         state = self.get_state(q.from_user.id)
         athlete = state.get("data", {}).get("athlete")
-        cl = (athlete.get("cycle_length_default") or 28) if athlete else 28
-        state["step"] = "survey_cycle"
-        await q.edit_message_text(
-            f"📅 *День цикла* (цикл ~{cl} дн.)\n\n"
-            f"Введи число — какой сегодня день цикла (1-{cl}).\n"
-            f"*Подсказка:* день 1 = первый день месячных."
-        )
+        if not athlete or state.get("step") != "survey_anchor":
+            await self._broken_survey_reply(q, update)
+            return
 
+        from datetime import date as _d, timedelta
+        today = _d.today()
+        d = q.data
 
-    async def set_cycle_day(self, update, ctx):
-        """Сохранить день цикла из кнопок."""
-        q = update.callback_query
-        await q.answer()
-        data = q.data
-        user_id = q.from_user.id
+        if d.startswith("anchor_") and d[7:].isdigit():
+            target = today - timedelta(days=int(d[7:]))
+            await self._save_cycle_anchor(q, state, athlete, target, "one_time_question")
+        elif d == "anchor_custom":
+            state["step"] = "survey_anchor_date"
+            await q.edit_message_text(
+                "🗓 Введи дату начала (ДД.ММ), например 05.10.\n"
+                "Можно не дальше 90 дней назад и не будущую дату.", parse_mode="Markdown")
+        elif d == "anchor_pre":
+            self.db.set_menarche_status(athlete["id"], "pre")
+            await self._ask_complaints(update, ctx)
+        elif d == "anchor_skip":
+            self.db.set_menarche_status(athlete["id"], "skip")
+            await self._ask_complaints(update, ctx)
+
+    async def _anchor_date_text(self, update, ctx):
+        """Текстовый шаг: девушка ввела дату якоря/коррекции «ДД.ММ»."""
+        user_id = update.effective_user.id
         state = self.get_state(user_id)
         athlete = state.get("data", {}).get("athlete")
-        if not athlete or state.get("step") != "survey_cycle":
-            # Потеря состояния — предлагаем начать заново
-            await q.edit_message_text(
-                "❌ *Опрос прерван* (возможно бот перезагружался).\n\nХотите начать заново?",
-                reply_markup=self.kb([[(f"🔄 Пройти опрос", "do_survey")],
-                                      [(f"🏠 Главное меню", "main_menu")]]),
-                parse_mode="Markdown"
-            )
+        if not athlete:
+            await self._broken_survey_reply(None, update)
             return
 
-        from cycle_medicine import get_cycle_phase
-        if data == "cycle_none":
+        from datetime import date as _d
+        from cycle_ui import parse_date_ru
+        target = parse_date_ru(update.message.text, _d.today())
+        if target is None:
+            await update.message.reply_text(
+                "❌ Не понял дату. Введи ДД.ММ (например 05.10) — "
+                "не дальше 90 дней назад и не в будущем.", parse_mode="Markdown")
+            return
+
+        class _MsgAsQ:  # общий путь _save_cycle_anchor ждёт q.edit_message_text
+            def __init__(self, msg):
+                self.msg = msg
+
+            async def edit_message_text(self, *a, **kw):
+                await self.msg.reply_text(*a, **kw)
+
+        ok = await self._save_cycle_anchor(_MsgAsQ(update.message), state, athlete,
+                                           target, "manual_date")
+        if ok:
             await self._ask_complaints(update, ctx)
+
+    async def ask_cycle_day(self, update, ctx):
+        """Ежедневный шаг цикла: один тап «начались сегодня?» (FLOW-модель).
+        Без якоря — сначала одноразовый вопрос."""
+        q, user_id, state, athlete = self._cycle_ctx(update)
+        if not athlete:
+            return
+        from datetime import date as _d
+        today = _d.today()
+        start = self.db.get_last_period_start(athlete["id"])
+        if start is None:
+            await self.ask_cycle_anchor(update, ctx)
+            return
+        state["step"] = "survey_cycle_daily"
+        cl = athlete.get("cycle_length_default") or 28
+        from cycle_engine import status as cycle_status
+        from cycle_ui import daily_cycle_keyboard, daily_cycle_text
+        name = athlete.get("first_name") or str(athlete.get("full_name", "")).split()[-1]
+        text = daily_cycle_text(name, start, cl, today)
+        buttons = daily_cycle_keyboard(cycle_status(start, cl, today))
+        await self._render_cycle_step(q, update, text, buttons)
+
+    async def set_cycle_daily(self, update, ctx):
+        """Тапы ежедневного шага: cyc_start / cyc_no / cyc_fix / cyc_anchor_again."""
+        q = update.callback_query
+        await q.answer()
+        state = self.get_state(q.from_user.id)
+        athlete = state.get("data", {}).get("athlete")
+        if not athlete or state.get("step") != "survey_cycle_daily":
+            await self._broken_survey_reply(q, update)
             return
 
-        ranges = {"cycle_1": 3, "cycle_6": 8, "cycle_11": 13,
-                  "cycle_16": 18, "cycle_21": 23, "cycle_26": 28}
-        cycle_day = ranges.get(data, 1)
-        cycle_length = athlete.get("cycle_length_default", 28)
-        phase_key, phase_info = get_cycle_phase(cycle_day, cycle_length)
+        from datetime import date as _d
+        from cycle_ui import survey_cycle_values
+        today = _d.today()
+        start = self.db.get_last_period_start(athlete["id"])
+        if start is None:
+            await self.ask_cycle_anchor(update, ctx)
+            return
+        cl = athlete.get("cycle_length_default") or 28
+        d = q.data
 
-        state["data"]["cycle_day"] = cycle_day
-        state["data"]["cycle_length"] = cycle_length
-        state["data"]["cycle_phase"] = phase_info.name_ru if phase_info else ""
-        await self._ask_complaints(update, ctx)
+        if d == "cyc_start":
+            self.db.add_cycle_event(athlete["id"], today, type="start", source="survey_button")
+            learned = self.db.update_cycle_length_from_history(athlete["id"])
+            if learned:
+                athlete["cycle_length_default"] = learned
+                athlete["cycle_length_learned"] = 1
+            vals = survey_cycle_values(today, learned or cl, today)  # день 1
+            state["data"].update(vals)
+            await self._ask_complaints(update, ctx)
+        elif d == "cyc_no":
+            state["data"].update(survey_cycle_values(start, cl, today))
+            await self._ask_complaints(update, ctx)
+        elif d == "cyc_fix":
+            state["step"] = "survey_cycle"
+            await q.edit_message_text(
+                f"✏️ Введи число — какой сегодня день цикла (1-{cl + 30}).\n"
+                "День 1 = первый день месячных.", parse_mode="Markdown")
+        elif d == "cyc_anchor_again":
+            state["step"] = "survey_anchor_date"
+            await q.edit_message_text(
+                "🗓 Когда на самом деле начались? Введи дату ДД.ММ — "
+                "можно задним числом, счёт пересчитается.", parse_mode="Markdown")
 
 
     async def _ask_cycle_length(self, update, ctx):

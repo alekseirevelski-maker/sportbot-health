@@ -392,8 +392,10 @@ class Database:
 
     def update_athlete_gender(self, athlete_id: int, gender: str, cycle_length: int = 28) -> bool:
         try:
+            # Ручная длина = ручной источник: флаг «выучена по истории» сбрасываем
             self.conn.execute(
-                "UPDATE athletes SET gender = ?, cycle_length_default = ? WHERE id = ?",
+                "UPDATE athletes SET gender = ?, cycle_length_default = ?, "
+                "cycle_length_learned = 0 WHERE id = ?",
                 (gender, cycle_length, athlete_id)
             )
             self.conn.commit()

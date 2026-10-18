@@ -107,6 +107,63 @@ def daily_cycle_text(name: str, start: date, length: int, today: date) -> str:
     return "\n".join(lines)
 
 
+def values_for_day(day: int, length: int) -> dict:
+    """Вычисляемые stored-значения для конкретного дня цикла (фаза без обёртки:
+    за длиной — честная «лютеиновая (задержка)»)."""
+    key, phase = get_cycle_phase(day, length)
+    if key is None:
+        name = "Лютеиновая (задержка)"
+    elif key == "irregular":
+        name = "Нерегулярный цикл"
+    else:
+        name = phase.name_ru
+    return {"cycle_day": day, "cycle_length": length, "cycle_phase": name}
+
+
+def survey_cycle_values(start: date, length: int, today: date) -> dict:
+    """Вычисленные значения для сохранения в опрос (stored-совместимость Excel):
+    день от якоря, фаза — через values_for_day."""
+    return values_for_day(cycle_day(start, today), length)
+
+
+def apply_anchor(db, athlete_id: int, target: date, today: date,
+                 current_length: int = 28, source: str = "anchor") -> Optional[dict]:
+    """Сохранить якорь (или ретро-скорректировать) и вернуть состояние цикла.
+
+    target раньше кэша — это коррекция задним числом: correct_cycle_anchor стирает
+    призрачные тапы позже. Иначе — обычная запись события. После — обучение длины.
+    None, если сохранить не удалось (будущая дата / ошибка БД).
+    """
+    if target > today:
+        return None
+    cur = db.get_last_period_start(athlete_id)
+    corrected = False
+    if cur is not None and target < cur:
+        if not db.correct_cycle_anchor(athlete_id, target):
+            return None
+        corrected = True
+    else:
+        if not db.add_cycle_event(athlete_id, target, type="anchor", source=source):
+            return None
+    learned = db.update_cycle_length_from_history(athlete_id)
+    length = learned or current_length or 28
+    start = db.get_last_period_start(athlete_id)
+    return {"start": start, "length": length, "learned": learned,
+            "corrected": corrected, **survey_cycle_values(start, length, today)}
+
+
+def cycle_saved_text(res: dict) -> str:
+    """Эхо-подтверждение после сохранения/коррекции якоря (одноразовый вопрос,
+    ручной ввод даты): «сегодня день N · фаза», плюс про персонализацию."""
+    line = (f"Сегодня *день {res['cycle_day']}* · "
+            f"{_phase_label(res['cycle_day'], res['length'])}.")
+    if res.get("learned"):
+        line += f"\n\n📅 Цикл персонализирован: ~*{res['learned']} дн.* (по твоим датам)"
+    if res.get("corrected"):
+        line += "\n\nИсправила дату — счёт переписан от неё."
+    return line
+
+
 def status_line(start: Optional[date], length: int, today: date,
                 learned: bool = False) -> Optional[str]:
     """Строка цикла для отчётов (врач/тренер/дайджест).
