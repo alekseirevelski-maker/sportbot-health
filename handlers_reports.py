@@ -3,9 +3,16 @@
 Автоматически извлечён из bot.py
 """
 
+import csv
+import io
 import logging
+from datetime import date, datetime
 from typing import TYPE_CHECKING
 from database import ACTIVE_TEAMS
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.drawing.image import Image as XLImage
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +41,15 @@ class ReportsMixin:
                 return
         team_filter = None if team == "all" else team
 
-        period_names = {1: "последний замер", 14: "2 недели", 30: "месяц", 90: "3 месяца", 999: "всё время"}
+        period_names = {1: "сегодня", 7: "7 дней", 14: "2 недели", 30: "месяц", 90: "3 месяца", 999: "всё время"}
+        period_label = period_names.get(days, f"{days} дн.")
+        period_tag = {1: "1d", 7: "7d", 14: "14d", 30: "30d", 90: "90d", 999: "all"}.get(days, f"{days}d")
+
+        def _hooper(row):
+            """Hooper = Сон + Утомление + Крепатура (каждое 1-7, итог 3-21)."""
+            v = [row.get("sleep_score"), row.get("fatigue_score"), row.get("muscle_soreness")]
+            v = [x for x in v if x is not None]
+            return sum(v) if v else None
 
         wb = Workbook()
 
@@ -106,7 +121,7 @@ class ReportsMixin:
         ws0.merge_cells("A1:H1")
         cell(ws0, 1, 1, "📋 ЧБК — СВОДНЫЙ ОТЧЁТ", font=title_font, border=None)
         ws0.merge_cells("A2:H2")
-        cell(ws0, 2, 1, f"Период: {period_names[days]} | Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}", font=subtitle_font, border=None)
+        cell(ws0, 2, 1, f"Период: {period_label} | Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}", font=subtitle_font, border=None)
 
         r = 4
         sum_headers = ["Команда", "Спортсменов", "С опросами", "Опросов", "Участие %", "Сон ср.", "Утомл. ср."]
@@ -121,8 +136,10 @@ class ReportsMixin:
             with_data = sum(1 for a in ta if a.get("days_count", 0) > 0)
             if total > 0 and with_data > 0:
                 # средние из сводки
-                avg_s = sum((a.get("avg_sleep") or 0) for a in ta if a.get("avg_sleep")) / sum(1 for a in ta if a.get("avg_sleep"))
-                avg_f = sum((a.get("avg_fatigue") or 0) for a in ta if a.get("avg_fatigue")) / sum(1 for a in ta if a.get("avg_fatigue"))
+                _sleep_vals = [a.get("avg_sleep") for a in ta if a.get("avg_sleep")]
+                _fat_vals = [a.get("avg_fatigue") for a in ta if a.get("avg_fatigue")]
+                avg_s = sum(_sleep_vals) / len(_sleep_vals) if _sleep_vals else 0
+                avg_f = sum(_fat_vals) / len(_fat_vals) if _fat_vals else 0
                 particip = round(with_data / total * 100) if total else 0
             else:
                 avg_s = avg_f = 0
@@ -153,8 +170,56 @@ class ReportsMixin:
         for ci in range(1, 9):
             ws0.column_dimensions[chr(64+ci)].width = 18
 
-        # ---- ЛИСТЫ ПО КОМАНДАМ: детальные опросы по дням ----
-        for t in all_teams:
+        # ---- ЛИСТ «По дням»: плоская таблица (одна строка = один опрос) ----
+        # Основной лист для тренера: строки фильтруются и сортируются, ширина не растёт
+        # с периодом. Матрица «игрок × день × 7 показателей» на 90 днях даёт 400+
+        # столбцов, и часть просмотрщиков обрезает её на 256 столбцах.
+        ws_d = wb.create_sheet(title="По дням")
+        flat_cols = [
+            ("Команда", 22), ("Игрок", 24), ("Дата", 11), ("День", 7),
+            ("Сон\n(1-7)", 10), ("Утомл\n(1-7)", 10),
+            ("Крепатура\n(1-7, 7=не болят)", 16), ("Боль NRS\n(0-10, 0=нет боли)", 16),
+            ("Пульс покоя\n(уд/мин)", 13), ("sRPE\n(1-10)", 10), ("Hooper\n(3-21)", 11),
+        ]
+        n_flat = len(flat_cols)
+        last_flat = get_column_letter(n_flat)
+        ws_d.merge_cells(f"A1:{last_flat}1")
+        cell(ws_d, 1, 1, "🏀 ЧБК — ОПРОСЫ ПО ДНЯМ", font=title_font, border=None)
+        ws_d.merge_cells(f"A2:{last_flat}2")
+        cell(ws_d, 2, 1, f"Период: {period_label} | Дата отчёта: {datetime.now().strftime('%d.%m.%Y %H:%M')} | Опросов: {len(wellness_rows)}", font=subtitle_font, border=None)
+        for _ci, (_h, _w) in enumerate(flat_cols, 1):
+            cell(ws_d, 3, _ci, _h, font=hf, fill=hfl, align=hdr_align)
+            ws_d.column_dimensions[get_column_letter(_ci)].width = _w
+        ws_d.row_dimensions[3].height = 30
+        ws_d.freeze_panes = "D4"
+        _flat_days = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+        _flat_row = 4
+        for _row in sorted(wellness_rows, key=lambda x: (str(x.get("team") or ""), str(x.get("full_name") or ""), str(x.get("survey_date") or ""))):
+            _dt = str(_row.get("survey_date") or "")
+            try:
+                _wd = _flat_days[datetime.strptime(_dt, "%Y-%m-%d").weekday()]
+            except ValueError:
+                _wd = ""
+            _flat_vals = [
+                _row.get("team", ""), _row.get("full_name", ""), _dt, _wd,
+                _row.get("sleep_score"), _row.get("fatigue_score"), _row.get("muscle_soreness"),
+                _row.get("pain_nrs"), _row.get("resting_hr"), _row.get("sRPE_score"), _hooper(_row),
+            ]
+            _fills = {5: self._xl_score_fill, 6: self._xl_score_fill, 7: self._xl_score_fill,
+                      8: self._xl_pain_fill, 9: self._xl_hr_fill,
+                      10: self._xl_srpe_fill, 11: self._xl_hooper_fill}
+            for _ci, _v in enumerate(_flat_vals, 1):
+                _cc = cell(ws_d, _flat_row, _ci, _v if _v is not None else "",
+                           align=center if _ci >= 3 else None)
+                if _ci in _fills:
+                    _cc.fill = _fills[_ci](_v) if isinstance(_v, (int, float)) else gray_fill
+            _flat_row += 1
+        if _flat_row > 4:
+            ws_d.auto_filter.ref = f"A3:{last_flat}{_flat_row - 1}"
+        self._add_logo_to_ws(ws_d, anchor=f"{get_column_letter(n_flat + 2)}3", size=80)
+
+        # ---- ЛИСТЫ ПО КОМАНДАМ: матрица «игрок × день» (только для коротких периодов) ----
+        for t in (all_teams if days <= 30 else []):
             ws = wb.create_sheet(title=t[:31])
             ta = summary_by_team.get(t, [])
             rows = rows_by_team.get(t, [])
@@ -164,11 +229,12 @@ class ReportsMixin:
             cell(ws, r, 1, f"🏀 ЧБК — Опросы по дням: {t}", font=title_font, border=None)
             r += 1
             ws.merge_cells(f"A{r}:L{r}")
-            cell(ws, r, 1, f"Период: {period_names[days]} | Дата отчёта: {datetime.now().strftime('%d.%m.%Y %H:%M')} | Всего спортсменов: {len(ta)}", font=subtitle_font, border=None)
+            cell(ws, r, 1, f"Период: {period_label} | Дата отчёта: {datetime.now().strftime('%d.%m.%Y %H:%M')} | Всего спортсменов: {len(ta)}", font=subtitle_font, border=None)
             r += 1
 
             # ===== БЛОК: МАТРИЦА «ИГРОК-СТРОКА, ДЕНЬ-СТОЛБЕЦ, ПОДСТОЛБЦЫ=ПОКАЗАТЕЛИ» =====
-            from openpyxl.utils import get_column_letter
+            # get_column_letter импортирован на уровне модуля (inner-import делал имя
+            # локальным и ломал использование выше по функции)
             # Ключи row: full_name, team, age_group, athlete_id, survey_date,
             # sleep_score, stress_score, fatigue_score, muscle_soreness, mood_score,
             # resting_hr, hrv_ms, had_training, sRPE_score, cycle_day, cycle_phase, complaints
@@ -229,6 +295,22 @@ class ReportsMixin:
             cell(ws, r, 23, "Пропуск:", font=Font(size=9, bold=True, color="404040"), border=None)
             cc = cell(ws, r, 25, "", fill=gray_fill)
             cell(ws, r, 26, "не заполнен · «Ср.»=Hooper", font=normal_font, border=None)
+            r += 1
+            # Строка: Боль NRS + sRPE (у этих столбцов своя шкала — не 1-7)
+            cell(ws, r, 1, "Боль NRS:", font=Font(size=9, bold=True, color="404040"), border=None)
+            seq4 = [(circ_colors[0], "0 нет боли"), (circ_colors[1], "1-4 лёгкая"), (circ_colors[2], "5+ красный флаг")]
+            sc = 3
+            for col_c, lab in seq4:
+                cell(ws, r, sc, "●", font=Font(bold=True, size=11, color=col_c), border=None)
+                cell(ws, r, sc + 1, lab, font=normal_font, border=None)
+                sc += 3
+            cell(ws, r, 17, "sRPE:", font=Font(size=9, bold=True, color="404040"), border=None)
+            seq5 = [(circ_colors[0], "1-4 лёгкая"), (circ_colors[1], "5-7 средняя"), (circ_colors[2], "8-10 тяжёлая")]
+            sc = 19
+            for col_c, lab in seq5:
+                cell(ws, r, sc, "●", font=Font(bold=True, size=11, color=col_c), border=None)
+                cell(ws, r, sc + 1, lab, font=normal_font, border=None)
+                sc += 3
             r += 1
 
             # Двухуровневая шапка: строка дат (SR_DATE), строка метрик (SR_METR)
@@ -347,13 +429,14 @@ class ReportsMixin:
         _c = ws_leg.cell(_lr, 1, "Расшифровка показателей в отчёте по дням (что это и как читать).")
         _c.font = Font(size=9, italic=True, color="808080"); _lr += 2
         legend_rows = [
-            ("ХУПЕР (Hooper)", "Индекс готовности = Сон (1-7) + Утомление (1-7) + Крепатура (1-7). Итог 3-21. Чем выше — тем лучше готов к нагрузке. 17-21 — отличная готовность, 12-16 — средняя, 3-11 — низкая (риск перегрузки/болезни)."),
-            ("sRPE", "Субъективная оценка нагрузки на тренировке, 1-10 (RPE — насколько тяжело было). 1-4 — лёгкая, 5-7 — средняя, 8-10 — тяжёлая. Высокий sRPE несколько дней подряд = пора снизить нагрузку."),
+            ("КРЕПАТУРА (1-7)", "Мышечная болезненность (DOMS) после нагрузки: 7 = мышцы НЕ болят, 1 = сильная боль. Это НЕ травма и НЕ «боль NRS». Низкий балл = мышцы не восстановились."),
+            ("БОЛЬ NRS (0-10)", "Оценка боли (травма, сустав, спина): 0 = боли нет, 10 = невыносимая. 1-4 — лёгкая, 5 и выше — красный флаг: показать врачу. 0 — это норма, а не «сильная боль»."),
             ("ПУЛЬС ПОКОЯ (RHR)", "Ударов в минуту, измеряется утром сразу после пробуждения, лёжа. Чем ниже — тем тренированнее сердце. Рост пульса покоя на 5-10 уд/мин к личной норме = возможная перегрузка или начало болезни. >70 — внимание, >80 — риск."),
-            ("HRV (вариабельность)", "Вариабельность сердечного ритма, мс. Отражает баланс нервной системы и уровень восстановления. Чем выше — тем лучше организм восстановился. Источник — умные часы/биоимпеданс (в ежедневном опросе не измеряется)."),
-            ("КРЕПАТУРА", "Мышечная болезненность (DOMS) после нагрузки, 1-7. 7 = мышцы не болят, 1 = сильная боль. Низкий балл = мышцы не восстановились."),
-            ("БОЛЬ NRS", "Оценка боли по шкале 0-10: 0 = боли нет, 10 = невыносимая. 1-4 — лёгкая, 5 и выше — красный флаг: показать врачу."),
-            ("СОН / УТОМЛЕНИЕ", "Шкалы 1-7, где 7 = отличный сон / бодрость, 1 = плохой сон / упадок сил. Входят в расчёт Хупера."),
+            ("СОН / УТОМЛЕНИЕ (1-7)", "Шкалы 1-7, где 7 = отличный сон / бодрость, 1 = плохой сон / упадок сил. Входят в расчёт Хупера."),
+            ("ХУПЕР (Hooper, 3-21)", "Индекс готовности = Сон (1-7) + Утомление (1-7) + Крепатура (1-7). Чем выше — тем лучше готов к нагрузке. 17-21 — отличная готовность, 12-16 — средняя, 3-11 — низкая (риск перегрузки/болезни)."),
+            ("sRPE (1-10)", "Субъективная оценка нагрузки на тренировке (RPE — насколько тяжело было). 1-4 — лёгкая, 5-7 — средняя, 8-10 — тяжёлая. Высокий sRPE несколько дней подряд = пора снизить нагрузку. Заполняется только в дни тренировок, поэтому пусто у тех, кто не тренировался."),
+            ("HRV (вариабельность)", "Вариабельность сердечного ритма, мс. Отражает баланс нервной системы и уровень восстановления. Источник — умные часы/биоимпеданс (в ежедневном опросе не измеряется)."),
+            ("ГДЕ СМОТРЕТЬ", "Лист «По дням» — одна строка = один опрос, столбцы подписаны вместе со шкалой; таблицу можно фильтровать по команде, игроку и дате. Листы команд с матрицей «игрок × день» выгружаются только для периода до 30 дней: на 90 днях такая матрица шире 400 столбцов, и часть программ показывает её не полностью."),
         ]
         for _col1, _col2 in legend_rows:
             _c = ws_leg.cell(_lr, 1, _col1); _c.font = Font(bold=True, size=10)
@@ -369,14 +452,30 @@ class ReportsMixin:
             _c = ws_leg.cell(_lr, 2, _lab); _c.font = Font(size=10)
             _lr += 1
 
+        # Пороговые значения цветов по каждому показателю (снимает путаницу шкал)
+        _lr += 1
+        _c = ws_leg.cell(_lr, 1, "ПОРОГИ ЦВЕТА ПО КАЖДОМУ ПОКАЗАТЕЛЮ")
+        _c.font = Font(bold=True, size=11); _lr += 1
+        for _name, _gr, _ye, _re in [
+            ("Сон / Утомл / Крепатура (1-7)", "6-7", "4-5", "1-3"),
+            ("Боль NRS (0-10)", "0 — боли нет", "1-4 — лёгкая", "5 и выше"),
+            ("Пульс покоя (уд/мин)", "60 и ниже", "61-70", "71 и выше"),
+            ("sRPE (1-10)", "1-4", "5-7", "8-10"),
+            ("Hooper (3-21)", "17-21", "12-16", "3-11"),
+        ]:
+            _c = ws_leg.cell(_lr, 1, _name); _c.font = Font(bold=True, size=10)
+            _c = ws_leg.cell(_lr, 2, f"зелёный: {_gr}   ·   жёлтый: {_ye}   ·   красный: {_re}")
+            _c.font = Font(size=10)
+            _lr += 1
+
         # Убираем move_worksheet - Сводка уже первый лист
         output = io.BytesIO()
         wb.save(output)
         output.seek(0)
         await q.message.reply_document(
             document=output,
-            filename=f"report_{date.today().strftime('%Y%m%d')}.xlsx",
-            caption=f"📊 Excel-отчёт за {period_names.get(days, f'{days} дн.')} — детализация по дням"
+            filename=f"report_{period_tag}_{date.today().strftime('%Y%m%d')}.xlsx",
+            caption=f"📊 Excel-отчёт за {period_label} — лист «По дням» + сводка"
         )
 
     # ==================== МЕНЮ СОСТАВА ТЕЛА (СПОРТСМЕН) ====================
@@ -458,7 +557,7 @@ class ReportsMixin:
              font=subtitle_font, border=None)
 
         r = 4
-        sum_headers = ["Команда", "Спортсменов", "Ср. вес (кг)", "Ср. жир (%)", "Ср. мышцы (кг)"]
+        sum_headers = ["Команда", "Спортсменов", "Ср. вес (кг)", "Ср. жир (%)", "Ср. мышцы (%)"]
         for ci, h in enumerate(sum_headers, 1):
             cell(ws0, r, ci, h, font=hf, fill=hfl, align=hdr_align)
         r += 1
@@ -507,7 +606,7 @@ class ReportsMixin:
             ws0.column_dimensions[chr(64 + ci)].width = 18
 
         # ---- Листы по командам: матрица (игрок × дата, подстолбцы=метрики) ----
-        bc_metrics = ["Вес", "% Жира", "Мышцы (кг)", "Вода", "BMR"]
+        bc_metrics = ["Вес", "% Жира", "Мышцы (%)", "Вода", "BMR"]
         metric_cols = ["weight_kg", "body_fat_pct", "muscle_mass_kg", "body_water_pct", "bmr_kcal"]
 
         for t in all_teams:
@@ -620,7 +719,7 @@ class ReportsMixin:
         legend_rows = [
             ("ВЕС (кг)", "Масса тела в килограммах. Контроль динамики (рост/снижение) важен для планирования нагрузки."),
             ("% ЖИРА (body fat %)", "Процент жировой ткани. Норма для юных спортсменов: 10-18% (м), 18-26% (ж). Скорректировано +3% (Potter et al., 2021). GARLYN систематически занижает жир на ~3-4% относительно DXA."),
-            ("МЫШЕЧНАЯ МАССА (кг)", "Суммарная масса скелетных мышц. Рост = прогресс силы. Снижение при перегрузке/болезни."),
+            ("МЫШЕЧНАЯ МАССА (%)", "Мышечная масса в % от массы тела — так показывает само приложение GARLYN/MovingLife (не путать с кг). Рост = прогресс силы. Снижение при перегрузке/болезни."),
             ("ВОДА (body water %)", "Общий объём воды в теле. Норма: 55-65% (м), 50-60% (ж). Снижение <55% = обезвоживание (риск травм, снижение восстановления)."),
             ("BMR (ккал)", "Базовый метаболизм — количество калорий, которые организм тратит в покое. Рассчитан из безжировой массы. Для баскетболистов 15-18: ~1600-2200 ккал."),
             ("КОСТИ (bone mass кг)", "Минеральная плотность костей. Стабильна у молодых; резкое снижение — красный флаг. Норма Ca: 1300 мг/сут + витамин D 600-1000 МЕ."),

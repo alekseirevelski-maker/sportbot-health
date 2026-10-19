@@ -5,6 +5,7 @@
 
 import logging
 from typing import TYPE_CHECKING
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 logger = logging.getLogger(__name__)
 

@@ -5,6 +5,11 @@
 
 import logging
 from typing import TYPE_CHECKING
+from telegram import InlineKeyboardButton
+from config import BC_NORMS, BC_RED_FLAGS
+
+SCALE_PROFILE_COUNT = 50
+BC_PROFILE_PAGE = 25
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +116,7 @@ class BodyCompMixin:
         for aid, info in sorted(latest_by_athlete.items(), key=lambda x: x[1]["name"]):
             weight = f"{info['weight']:.1f}кг" if info['weight'] else "—"
             fat = f"{info['fat']:.1f}%" if info['fat'] else "—"
-            muscle = f"{info['muscle']:.1f}кг" if info['muscle'] else "—"
+            muscle = f"{info['muscle']:.1f}%" if info['muscle'] else "—"
             lines.append(
                 f"👤 *{info['name']}* | 📅 {info['date']} | "
                 f"⚖️ {weight} | жир {fat} | мышцы {muscle}"
@@ -286,7 +291,7 @@ class BodyCompMixin:
             ("Вес", latest.get("weight_kg"), "кг"),
             ("ИМТ", latest.get("bmi"), ""),
             ("Жир", latest.get("body_fat_pct"), "%"),
-            ("Мышцы", latest.get("muscle_mass_kg"), "кг"),
+            ("Мышцы", latest.get("muscle_mass_kg"), "%"),
             ("Вода", latest.get("body_water_pct"), "%"),
             ("Кости", latest.get("bone_mass_kg"), "кг"),
             ("Висц. жир", latest.get("visceral_fat_index"), ""),
@@ -321,7 +326,7 @@ class BodyCompMixin:
         if r.get("body_fat_pct") is not None:
             parts.append(f"жир {r['body_fat_pct']:.1f}%")
         if r.get("muscle_mass_kg") is not None:
-            parts.append(f"мышцы {r['muscle_mass_kg']:.1f}кг")
+            parts.append(f"мышцы {r['muscle_mass_kg']:.1f}%")
         if r.get("body_water_pct") is not None:
             parts.append(f"вода {r['body_water_pct']:.0f}%")
         date_s = str(r.get("record_date") or "?")
@@ -399,6 +404,17 @@ class BodyCompMixin:
         return f"{value:.1f}{unit} {status}"
 
 
+    def _bc_prev_measurement(self, latest, history):
+        """Предыдущий замер для тренда. История идёт ПО УБЫВАНИЮ даты, поэтому «самый
+        старый» — это history[-1], а предыдущий для тренда — первый со строго более
+        ранней датой, чем последний замер (иначе брался сам последний и дельта = +0.0)."""
+        last_d = str((latest or {}).get("record_date") or "")
+        for h in history or []:
+            if str(h.get("record_date") or "") < last_d:
+                return h
+        return None
+
+
     def _build_athlete_bc_report(self, latest, prev, athlete):
         """Построить сообщение анализа состава тела для спортсмена."""
         if not latest:
@@ -429,7 +445,7 @@ class BodyCompMixin:
             fat_status = self._get_bc_status(fat, "body_fat_pct", gender)
             lines.append(f"• Жир: *{fat:.1f}%* {fat_status}")
         if muscle is not None:
-            lines.append(f"• Мышцы: *{muscle:.1f}* кг")
+            lines.append(f"• Мышцы: *{muscle:.1f}* %")
         if water is not None:
             water_status = self._get_bc_status(water, "body_water_pct", gender)
             lines.append(f"• Вода: *{water:.0f}%* {water_status}")
@@ -437,10 +453,10 @@ class BodyCompMixin:
             lines.append(f"• Базовый метаболизм: *{bmr}* ккал")
 
         # Тренд (если есть предыдущий замер)
-        if prev and len(prev) >= 2:
-            # prev[-1] — текущий, prev[0] — самый старый за период
-            older = prev[0]
-            lines.append(f"\n*📈 Изменения за период:*")
+        base = self._bc_prev_measurement(latest, prev)
+        if base:
+            older = base
+            lines.append(f"\n*📈 Изменения с прошлого замера ({older.get('record_date')}):*")
             if weight is not None and older.get("weight_kg") is not None:
                 d = weight - older["weight_kg"]
                 lines.append(f"• Вес: {older['weight_kg']:.1f} → {weight:.1f} ({d:+.1f})")
@@ -451,7 +467,7 @@ class BodyCompMixin:
             if muscle is not None and older.get("muscle_mass_kg") is not None:
                 d = muscle - older["muscle_mass_kg"]
                 emoji = "✅" if d >= -0.5 else ("⚠️" if d >= -1.5 else "🚨")
-                lines.append(f"• Мышцы: {older['muscle_mass_kg']:.1f} → {muscle:.1f} ({d:+.1f} кг) {emoji}")
+                lines.append(f"• Мышцы: {older['muscle_mass_kg']:.1f}% → {muscle:.1f}% ({d:+.1f}%) {emoji}")
             if water is not None and older.get("body_water_pct") is not None:
                 d = water - older["body_water_pct"]
                 lines.append(f"• Вода: {older['body_water_pct']:.0f}% → {water:.0f}% ({d:+.0f}%)")
@@ -465,10 +481,8 @@ class BodyCompMixin:
             fat_high = fat_norms.get("body_fat_pct", (0, 100))[1]
             if fat > fat_high:
                 recs.append(f"⚠️ Жир выше нормы ({fat_high}%). Снизь калорийность рациона.")
-        if muscle is not None and prev and len(prev) >= 2:
-            older = prev[0]
-            if older.get("muscle_mass_kg") and muscle - older["muscle_mass_kg"] < -1.5:
-                recs.append("🚨 Потеря мышц! Обратись к врачу.")
+        if muscle is not None and base and base.get("muscle_mass_kg") and muscle - base["muscle_mass_kg"] < -1.5:
+            recs.append("🚨 Потеря мышц! Обратись к врачу.")
 
         if recs:
             lines.append(f"\n*💡 Рекомендации:*")
@@ -515,7 +529,7 @@ class BodyCompMixin:
         if fat is not None:
             parts.append(f"Жир: *{fat:.1f}%*")
         if muscle is not None:
-            parts.append(f"Мышцы: *{muscle:.1f}* кг")
+            parts.append(f"Мышцы: *{muscle:.1f}* %")
         if parts:
             lines.append(" | ".join(parts))
 
@@ -537,10 +551,11 @@ class BodyCompMixin:
         if parts3:
             lines.append(" | ".join(parts3))
 
-        # Тренд
-        if prev and len(prev) >= 2:
-            older = prev[0]
-            lines.append(f"\n*📈 Тренд 2 нед:*")
+        # Тренд — от предыдущего замера
+        base = self._bc_prev_measurement(latest, prev)
+        if base:
+            older = base
+            lines.append(f"\n*📈 Тренд с прошлого замера ({older.get('record_date')}):*")
             trend_parts = []
             if weight is not None and older.get("weight_kg") is not None:
                 d = weight - older["weight_kg"]
@@ -550,24 +565,20 @@ class BodyCompMixin:
                 trend_parts.append(f"жир {d:+.1f}%")
             if muscle is not None and older.get("muscle_mass_kg") is not None:
                 d = muscle - older["muscle_mass_kg"]
-                trend_parts.append(f"мышцы {d:+.1f}")
+                trend_parts.append(f"мышцы {d:+.1f}%")
             if trend_parts:
                 lines.append(" | ".join(trend_parts))
 
         # Красные флаги
         flags = []
-        if fat is not None and prev and len(prev) >= 2:
-            older = prev[0]
-            if older.get("body_fat_pct"):
-                d = abs(fat - older["body_fat_pct"])
-                if d > BC_RED_FLAGS["fat_change_pct"]:
-                    flags.append(f"⚠️ Жир изменился на {d:.1f}% — возможен артефакт. Перевзвеси!")
-        if muscle is not None and prev and len(prev) >= 2:
-            older = prev[0]
-            if older.get("muscle_mass_kg"):
-                d = muscle - older["muscle_mass_kg"]
-                if d < -BC_RED_FLAGS["muscle_loss_kg"]:
-                    flags.append(f"🚨 Потеря мышц: {d:+.1f} кг!")
+        if fat is not None and base and base.get("body_fat_pct"):
+            d = abs(fat - base["body_fat_pct"])
+            if d > BC_RED_FLAGS["fat_change_pct"]:
+                flags.append(f"⚠️ Жир изменился на {d:.1f}% — возможен артефакт. Перевзвеси!")
+        if muscle is not None and base and base.get("muscle_mass_kg"):
+            d = muscle - base["muscle_mass_kg"]
+            if d < -BC_RED_FLAGS["muscle_loss_pct"]:
+                flags.append(f"🚨 Потеря мышц: {d:+.1f}%!")
         if water is not None and water < BC_RED_FLAGS["water_critical_pct"]:
             flags.append(f"⚠️ Критическое обезвоживание: {water:.0f}%!")
         if visceral is not None and visceral > BC_RED_FLAGS["visceral_risk"]:
@@ -594,24 +605,22 @@ class BodyCompMixin:
         if weight is not None:
             parts.append(f"⚖️ *{weight:.1f}* кг")
         if muscle is not None:
-            parts.append(f"мышцы *{muscle:.1f}* кг")
+            parts.append(f"мышцы *{muscle:.1f}* %")
 
         trend_parts = []
-        if prev and len(prev) >= 2:
-            older = prev[0]
-            if weight is not None and older.get("weight_kg") is not None:
-                d = weight - older["weight_kg"]
+        base = self._bc_prev_measurement(latest, prev)
+        if base:
+            if weight is not None and base.get("weight_kg") is not None:
+                d = weight - base["weight_kg"]
                 trend_parts.append(f"{d:+.1f} кг")
-            if muscle is not None and older.get("muscle_mass_kg") is not None:
-                d = muscle - older["muscle_mass_kg"]
-                trend_parts.append(f"мышцы {d:+.1f}")
+            if muscle is not None and base.get("muscle_mass_kg") is not None:
+                d = muscle - base["muscle_mass_kg"]
+                trend_parts.append(f"мышцы {d:+.1f}%")
 
         # Определяем статус
         status = "✅ Норма"
-        if muscle is not None and prev and len(prev) >= 2:
-            older = prev[0]
-            if older.get("muscle_mass_kg") and muscle - older["muscle_mass_kg"] < -1.5:
-                status = "🚨 Внимание!"
+        if muscle is not None and base and base.get("muscle_mass_kg") and muscle - base["muscle_mass_kg"] < -1.5:
+            status = "🚨 Внимание!"
 
         lines = [
             f"📋 *Замер — {name}*",
@@ -775,7 +784,7 @@ class BodyCompMixin:
         metrics = [
             ("Вес", latest.get("weight_kg"), "кг", prev.get("weight_kg") if prev else None),
             ("Жир", latest.get("body_fat_pct"), "%", prev.get("body_fat_pct") if prev else None),
-            ("Мышцы", latest.get("muscle_mass_kg"), "кг", prev.get("muscle_mass_kg") if prev else None),
+            ("Мышцы", latest.get("muscle_mass_kg"), "%", prev.get("muscle_mass_kg") if prev else None),
             ("Вода", latest.get("body_water_pct"), "%", prev.get("body_water_pct") if prev else None),
             ("Кости", latest.get("bone_mass_kg"), "кг", prev.get("bone_mass_kg") if prev else None),
             ("Висц. жир", latest.get("visceral_fat_index"), "", prev.get("visceral_fat_index") if prev else None),
@@ -792,7 +801,7 @@ class BodyCompMixin:
             "\n📖 *Легенда:*\n"
             "• Вес — масса тела (кг)\n"
             "• Жир — % подкожного жира\n"
-            "• Мышцы — мышечная масса (кг)\n"
+            "• Мышцы — мышечная масса (% от массы тела)\n"
             "• Вода — % воды в организме\n"
             "• Кости — минеральная масса (кг)\n"
             "• Висц. жир — висцеральный жир (0-20)\n"
@@ -838,7 +847,7 @@ class BodyCompMixin:
             if r.get("body_fat_pct") is not None:
                 parts.append(f"жир {r['body_fat_pct']:.1f}%")
             if r.get("muscle_mass_kg") is not None:
-                parts.append(f"мышцы {r['muscle_mass_kg']:.1f}кг")
+                parts.append(f"мышцы {r['muscle_mass_kg']:.1f}%")
             if r.get("body_water_pct") is not None:
                 parts.append(f"вода {r['body_water_pct']:.0f}%")
             if r.get("bone_mass_kg") is not None:
@@ -876,7 +885,7 @@ class BodyCompMixin:
         key_metrics = [
             ("⚖️ Вес", "weight_kg", "кг"),
             ("🥩 Жир", "body_fat_pct", "%"),
-            ("💪 Мышцы", "muscle_mass_kg", "кг"),
+            ("💪 Мышцы", "muscle_mass_kg", "%"),
             ("💧 Вода", "body_water_pct", "%"),
         ]
 
