@@ -5,7 +5,7 @@
 
 import logging
 from typing import TYPE_CHECKING
-from telegram import InlineKeyboardButton
+from contact_ui import contact_row
 from config import SIMPLE_PROTOCOLS, MOTIVATIONAL_MESSAGES, HR_NORMS
 from gamification import get_motivation_key
 
@@ -455,10 +455,10 @@ class SurveyMixin:
                     else:
                         admin_text += f"\n✅ Все в норме\n"
 
-                    # Кнопка-ссылка на диалог со спортсменом — открывает личный чат Telegram
+                    # Кнопки врачу: прямой чат (у некоторых не открывается из-за приватности) + релей через бота
                     need_reply = bool(complaints) or (recs and recs != "✅ Все показатели в норме!")
-                    admin_buttons = ([[InlineKeyboardButton(f"💬 Написать {athlete_name}", url=f"tg://user?id={athlete['telegram_id']}")]]
-                                     if need_reply and athlete.get("telegram_id") else None)
+                    _crow = contact_row(athlete) if need_reply else None
+                    admin_buttons = [_crow] if _crow else None
 
                     await self._send_admin(admin_id, admin_text, buttons=admin_buttons)
         except Exception as e:
@@ -514,7 +514,8 @@ class SurveyMixin:
                     f"🏀 {athlete.get('team', '?')} | {athlete.get('age_group', '?')}\n\n"
                     + "\n".join(f"• {f}" for f in _flags)
                 )
-                _alert_btn = [[InlineKeyboardButton(f"💬 Написать {athlete.get('full_name', '?')}", url=f"tg://user?id={athlete['telegram_id']}")]] if athlete.get("telegram_id") else None
+                _crow = contact_row(athlete)
+                _alert_btn = [_crow] if _crow else None
                 for _aid in self._full_access_ids():
                     if _aid != user_id:
                         await self._send_admin(_aid, _alert, buttons=_alert_btn)

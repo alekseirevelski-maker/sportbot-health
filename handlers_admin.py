@@ -6,7 +6,7 @@
 import logging
 from datetime import date
 from typing import TYPE_CHECKING
-from telegram import InlineKeyboardButton
+from contact_ui import contact_row
 from config import AGE_GROUPS, ADMIN_IDS, REMINDER_HOUR_DEFAULT, REMINDER_MINUTE_DEFAULT
 from database import TEAMS
 
@@ -188,8 +188,9 @@ class AdminMixin:
             date_str = c.get("survey_date", "?")
             text += f"👤 *{c['full_name']}* ({c.get('team', '?')})\n"
             text += f"   📅 {date_str} | 💬 {c.get('complaints', '?')}\n\n"
-            if c.get("telegram_id"):
-                btns.append([InlineKeyboardButton(f"💬 Написать: {c['full_name']}", url=f"tg://user?id={c['telegram_id']}")])
+            _crow = contact_row(c)
+            if _crow:
+                btns.append(_crow)
         if len(complaints) > 15:
             text += f"… и ещё {len(complaints) - 15}\n"
         btns.append([("🔙 Назад", "admin_complaints"), (f"🏠 Главное меню", "main_menu")])
