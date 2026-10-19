@@ -9,3 +9,19 @@ __pycache__/
 *.pyc
 bot.pid
 .superpowers/
+
+# Локальные копии прода и одноразовые скрипты — не коммитить
+_*
+*_prod_*
+*_bak_*
+probe_*.py
+verify_*.py
+inspect_*.py
+audit_*.py
+cleanup_db.py
+cmp_norm.py
+smoke_parser.py
+set_reminder_marker.py
+z5z6_assign.py
+add_*.py
+*.sql
