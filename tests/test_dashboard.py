@@ -248,6 +248,34 @@ def test_dash_today_denied_for_athlete(tmp_path, monkeypatch):
     assert not q.edits
 
 
+def test_bc_view_scope_denial_visible_after_dispatcher_answer(tmp_path, monkeypatch):
+    """E2E: тренер А жмёт bc_view_<спортсмен команды Б> через РЕАЛЬНЫЙ callback_handler.
+
+    Диспетчер уже ответил на callback (пустой q.answer) — одноразовый ответ
+    израсходован, поэтому алерт scope-отказа («Query is already answered»)
+    не проходит. Отказ всё равно должен быть ВИДИМ: замена сообщения на
+    «⛔ Нет доступа», без падения хендлера и без рендера чужих данных.
+    """
+    import bot as bot_module
+    monkeypatch.setattr(bot_module, "ADMIN_TELEGRAM_IDS", set())
+    db, ids = _seed(tmp_path)  # COACH_A_ID закреплён за TEAM_A; ids[201] — TEAM_B
+    obj = _bot_obj(db)
+
+    q = FakeQ(COACH_A_ID, f"bc_view_{ids[201]}")
+    update = SimpleNamespace(callback_query=q, message=None,
+                             effective_user=SimpleNamespace(id=COACH_A_ID))
+    asyncio.run(obj.callback_handler(update, None))  # не должен упасть
+
+    # единственный ответ — пустой от диспетчера; алерт хендлера не прошёл
+    assert len(q.answers) == 1
+    assert q.answers[0] == ((), {})
+    # отказ виден через замену сообщения, чужие данные не отрендерены
+    assert len(q.edits) == 1
+    text = q.edits[0][0]
+    assert "⛔ Нет доступа" in text
+    assert "Третья Слабая" not in text
+
+
 def test_show_today_dashboard_doctor_renders_and_caches(tmp_path, monkeypatch):
     import bot as bot_module
     monkeypatch.setattr(bot_module, "ADMIN_TELEGRAM_IDS", {DOCTOR_ID})

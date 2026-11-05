@@ -90,8 +90,9 @@ class BodyCompMixin:
         q = update.callback_query
         team = q.data.replace("bc_team_", "")
         # Scope: тренер видит только свои команды (роль проверена гейтом
-        # диспетчера; админ/врач — без ограничений). Отказной алерт должен быть
-        # ПЕРВЫМ ответом на callback, поэтому q.answer() — только после проверки.
+        # диспетчера; админ/врач — без ограничений). Диспетчер уже мог ответить
+        # на callback (одноразовый ответ), поэтому алерт может не пройти —
+        # делаем отказ видимым ещё и заменой сообщения.
         _uid = q.from_user.id
         if not self._is_full_access(_uid) and team not in set(self.db.get_coach_teams(_uid)):
             logger.warning(f"Access denied (scope bc_team_): user {_uid}, team {team}")
@@ -99,8 +100,15 @@ class BodyCompMixin:
                 await q.answer("⛔ Нет доступа", show_alert=True)
             except Exception:
                 pass
+            try:
+                await q.edit_message_text("⛔ Нет доступа")
+            except Exception:
+                pass
             return
-        await q.answer()
+        try:
+            await q.answer()
+        except Exception:
+            pass  # обычно «Query is already answered» от диспетчера — не ошибка
         athletes_with_data = self.db.get_bc_period(days=999)
 
         latest_by_athlete = {}
@@ -272,11 +280,21 @@ class BodyCompMixin:
         """Карточка состава тела спортсмена (только врач/тренер), расширенные метрики."""
         q = update.callback_query
         if not self._is_admin_or_coach(q.from_user.id):
+            logger.warning(f"Access denied (role bc_view_): user {q.from_user.id}")
+            try:
+                await q.answer("⛔ Нет доступа", show_alert=True)
+            except Exception:
+                pass
+            try:
+                await q.edit_message_text("⛔ Нет доступа")
+            except Exception:
+                pass
             return
         athlete_id = int(q.data.replace("bc_view_", ""))
         # Scope: тренер видит только спортсменов своих команд (роль проверена
-        # гейтом диспетчера; админ/врач — без ограничений). Отказной алерт должен
-        # быть ПЕРВЫМ ответом на callback, поэтому q.answer() — только после проверки.
+        # гейтом диспетчера; админ/врач — без ограничений). Диспетчер уже мог
+        # ответить на callback (одноразовый ответ), поэтому алерт может не
+        # пройти — делаем отказ видимым ещё и заменой сообщения.
         _uid = q.from_user.id
         if not self._is_full_access(_uid):
             _a = self.db.get_athlete_by_id(athlete_id)
@@ -286,8 +304,15 @@ class BodyCompMixin:
                     await q.answer("⛔ Нет доступа", show_alert=True)
                 except Exception:
                     pass
+                try:
+                    await q.edit_message_text("⛔ Нет доступа")
+                except Exception:
+                    pass
                 return
-        await q.answer()
+        try:
+            await q.answer()
+        except Exception:
+            pass  # обычно «Query is already answered» от диспетчера — не ошибка
         history = self.db.get_body_composition(athlete_id, days=30)
         if not history:
             name = "спортсмен"
