@@ -253,6 +253,12 @@ class Database:
                 self.conn.execute(f"ALTER TABLE daily_wellness ADD COLUMN {col} {coltype}")
             except Exception:
                 pass  # колонка уже есть
+        # Миграция: bot_blocked в athletes — спортсмен заблокировал бота,
+        # рассылки ему прекращаются до повторного /start
+        try:
+            self.conn.execute("ALTER TABLE athletes ADD COLUMN bot_blocked INTEGER DEFAULT 0")
+        except Exception:
+            pass  # колонка уже есть
         # Таблица данных с умных часов (Фаза 5)
         self.conn.execute("""CREATE TABLE IF NOT EXISTS watch_data (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1047,6 +1053,24 @@ class Database:
         except Exception as e:
             logger.error(f"Unban athlete: {e}")
             return False
+
+    def set_bot_blocked(self, athlete_id: int, flag: int = 1) -> bool:
+        """Спортсмен заблокировал бота (1) или снова написал /start (0)."""
+        try:
+            self.conn.execute(
+                "UPDATE athletes SET bot_blocked = ? WHERE id = ?", (flag, athlete_id)
+            )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"set_bot_blocked: {e}")
+            return False
+
+    def get_bot_blocked(self, athlete_id: int) -> int:
+        row = self.conn.execute(
+            "SELECT bot_blocked FROM athletes WHERE id = ?", (athlete_id,)
+        ).fetchone()
+        return int(row["bot_blocked"] or 0) if row else 0
 
     def get_banned_athletes(self):
         rows = self.conn.execute("SELECT a.id, a.full_name, a.team, b.banned_at, b.reason FROM athletes a JOIN banned_athletes b ON a.id = b.athlete_id ORDER BY b.banned_at DESC").fetchall()

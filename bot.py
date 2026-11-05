@@ -12,6 +12,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.drawing.image import Image as XLImage
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import Forbidden
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
@@ -1520,6 +1521,21 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
             else:
                 logger.error(f"Send to admin {admin_id}: {e}")
 
+    async def _mark_bot_blocked(self, a):
+        """Спортсмен заблокировал бота (Forbidden): флаг bot_blocked=1, рассылки
+        ему прекращаются. Врач уведомляется ОДИН раз — на переходе 0→1.
+        В лог — только athlete_id (без ФИО/telegram_id, гигиена ПДн)."""
+        prev = self.db.get_bot_blocked(a["id"])
+        self.db.set_bot_blocked(a["id"], 1)
+        logger.info(f"Athlete #{a['id']} blocked the bot — unsubscribed from broadcasts")
+        if not prev:
+            for admin_id in self._full_access_ids():
+                await self._send_admin(
+                    admin_id,
+                    f"⚠️ Спортсмен #{a['id']} ({a.get('full_name', '?')}) "
+                    f"заблокировал бота — мониторинг прерван"
+                )
+
     async def _admin_reply_start(self, update, ctx):
         """Врач/тренер отвечает спортсмену по жалобе — ждём текст сообщения."""
         q = update.callback_query
@@ -1598,6 +1614,9 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
         sent = 0
         skipped = 0
         for a in athletes:
+            if a.get("bot_blocked"):
+                skipped += 1
+                continue
             if survey_map.get(a["id"], False):
                 skipped += 1
                 continue
@@ -1619,6 +1638,8 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                     parse_mode="Markdown"
                 )
                 sent += 1
+            except Forbidden:
+                await self._mark_bot_blocked(a)
             except Exception as e:
                 logger.error(f"Reminder error for athlete #{a['id']}: {e}")
 
@@ -1767,6 +1788,8 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
         sent = 0
         failed = 0
         for a in athletes:
+            if a.get("bot_blocked"):
+                continue
             try:
                 # Пропускаем тех, у кого нет данных за неделю (нет смысла в отчёте)
                 stats = self.db.get_athlete_stats(a["id"], 7)
@@ -1810,6 +1833,8 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                         parse_mode="Markdown"
                     )
                 sent += 1
+            except Forbidden:
+                await self._mark_bot_blocked(a)
             except Exception as e:
                 failed += 1
                 logger.error(f"Weekly report error for {a.get('full_name', '?')} (tg={a.get('telegram_id')}): {e}")

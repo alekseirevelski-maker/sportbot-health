@@ -38,6 +38,11 @@ class RegistrationMixin:
                 else:
                     await update.message.reply_text("🔒 Твой аккаунт заблокирован. Обратись к администратору.", reply_markup=self.kb([[(f"🏠 Главное меню", "main_menu")]]))
                 return
+            # Спортсмен снова с ботом: сброс флага блокировки + уведомление врачу
+            if athlete.get("bot_blocked"):
+                self.db.set_bot_blocked(athlete["id"], 0)
+                for admin_id in self._full_access_ids():
+                    await self._send_admin(admin_id, f"✅ Спортсмен #{athlete['id']} снова с ботом")
             # Само-синхронизация имени из Telegram (только если похоже на имя, не ник)
             if user.first_name and self._looks_like_name(user.first_name) and athlete.get("first_name") != user.first_name:
                 self.db.set_athlete_first_name(athlete["id"], user.first_name)
