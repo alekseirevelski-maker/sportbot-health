@@ -15,6 +15,22 @@ if TYPE_CHECKING:
     from bot import SportHealthBot
 
 
+def red_flag_recipients(db, team, full_ids, sender_id) -> list[int]:
+    """Получатели red-flag алерта опроса: врачи (full_access) + тренеры команды.
+
+    Отправитель (sender_id) исключается — не дублируем тому, кто прошёл опрос.
+    Тренер, уже входящий в full_ids, тоже попадёт в список один раз (union).
+    """
+    ids = set(full_ids or ())
+    if team:
+        try:
+            ids.update(db.get_team_coaches(team))
+        except Exception as e:
+            logger.error(f"red_flag_recipients get_team_coaches: {e}")
+    ids.discard(sender_id)
+    return sorted(ids)
+
+
 class SurveyMixin:
     """Миксин для survey."""
 
@@ -516,9 +532,9 @@ class SurveyMixin:
                 )
                 _crow = contact_row(athlete)
                 _alert_btn = [_crow] if _crow else None
-                for _aid in self._full_access_ids():
-                    if _aid != user_id:
-                        await self._send_admin(_aid, _alert, buttons=_alert_btn)
+                # Red-flag видят врачи И тренер команды спортсмена
+                for _aid in red_flag_recipients(self.db, athlete.get("team"), self._full_access_ids(), user_id):
+                    await self._send_admin(_aid, _alert, buttons=_alert_btn)
         except Exception as e:
             logger.error(f"Red-flag alert error: {e}")
 
