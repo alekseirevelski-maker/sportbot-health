@@ -35,6 +35,7 @@ from watch_parser import parse_watch
 from scale_csv_parser import parse_scale_csv_dated
 
 from validator import sanitize_text, validate_heart_rate, validate_age_ge14
+from access_control import required_role_for
 
 if PROXY_URL:
     os.environ["http_proxy"] = PROXY_URL
@@ -1165,6 +1166,24 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
             return
         d = q.data
         logger.info(f"Callback: {d} from {q.from_user.id}")
+
+        # Default-deny гейт ролей (access_control.py) — ДО любого роутинга.
+        # Точечные проверки внутри хендлеров сохранены (defense in depth).
+        _req = required_role_for(d)
+        if _req == "full" and not self._is_full_access(q.from_user.id):
+            logger.warning(f"Access denied (full required): {d} from {q.from_user.id}")
+            try:
+                await q.answer("⛔ Нет доступа", show_alert=True)
+            except Exception:
+                pass
+            return
+        if _req == "coach" and not self._is_admin_or_coach(q.from_user.id):
+            logger.warning(f"Access denied (coach required): {d} from {q.from_user.id}")
+            try:
+                await q.answer("⛔ Нет доступа", show_alert=True)
+            except Exception:
+                pass
+            return
 
         # Само-синхронизация имени из Telegram (только если похоже на имя, не ник)
         if q.from_user.first_name and self._looks_like_name(q.from_user.first_name):

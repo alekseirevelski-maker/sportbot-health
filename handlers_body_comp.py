@@ -90,6 +90,16 @@ class BodyCompMixin:
         q = update.callback_query
         await q.answer()
         team = q.data.replace("bc_team_", "")
+        # Scope: тренер видит только свои команды (роль проверена гейтом
+        # диспетчера; админ/врач — без ограничений)
+        _uid = q.from_user.id
+        if not self._is_full_access(_uid) and team not in set(self.db.get_coach_teams(_uid)):
+            logger.warning(f"Access denied (scope bc_team_): user {_uid}, team {team}")
+            try:
+                await q.answer("⛔ Нет доступа", show_alert=True)
+            except Exception:
+                pass
+            return
         athletes_with_data = self.db.get_bc_period(days=999)
 
         latest_by_athlete = {}
@@ -264,6 +274,18 @@ class BodyCompMixin:
         if not self._is_admin_or_coach(q.from_user.id):
             return
         athlete_id = int(q.data.replace("bc_view_", ""))
+        # Scope: тренер видит только спортсменов своих команд (роль проверена
+        # гейтом диспетчера; админ/врач — без ограничений)
+        _uid = q.from_user.id
+        if not self._is_full_access(_uid):
+            _a = self.db.get_athlete_by_id(athlete_id)
+            if not _a or _a.get("team") not in set(self.db.get_coach_teams(_uid)):
+                logger.warning(f"Access denied (scope bc_view_): user {_uid}, athlete {athlete_id}")
+                try:
+                    await q.answer("⛔ Нет доступа", show_alert=True)
+                except Exception:
+                    pass
+                return
         history = self.db.get_body_composition(athlete_id, days=30)
         if not history:
             name = "спортсмен"
@@ -938,6 +960,14 @@ class BodyCompMixin:
 
     async def _bc_import_to_athlete(self, update, ctx):
         """Сохранение CSV без профиля на выбранного спортсмена."""
+        # Импорт чужих данных — только полный доступ (админ/врач)
+        if not self._is_full_access(update.effective_user.id):
+            logger.warning(f"Access denied (bc_import_to_): {update.effective_user.id}")
+            try:
+                await update.callback_query.answer("⛔ Нет доступа", show_alert=True)
+            except Exception:
+                pass
+            return
         q = update.callback_query
         await q.answer()
         athlete_id = int(q.data.replace("bc_import_to_", ""))
