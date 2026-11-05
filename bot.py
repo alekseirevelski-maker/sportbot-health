@@ -1250,11 +1250,8 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
 
     async def callback_handler(self, update, ctx):
         q = update.callback_query
-        try:
-            await q.answer()
-        except Exception:
-            pass
-        # Rate-limit: спам инлайн-кнопками (общий счётчик с текстом, 30/мин)
+        # Rate-limit: спам инлайн-кнопками (общий счётчик с текстом, 30/мин).
+        # Ответ на callback одноразовый — алерт rate-limit'а и есть первый ответ.
         if not self.check_rate_limit(q.from_user.id):
             try:
                 await q.answer("⚠️ Подожди минуту.", show_alert=True)
@@ -1264,7 +1261,9 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
         d = q.data
         logger.debug("Callback: %s uid=%s", d, q.from_user.id)
 
-        # Default-deny гейт ролей (access_control.py) — ДО любого роутинга.
+        # Default-deny гейт ролей (access_control.py) — ДО любого роутинга
+        # и ДО пустого q.answer(): отказной алерт должен быть ПЕРВЫМ ответом,
+        # иначе Telegram вернёт "Query is already answered" и юзер ничего не увидит.
         # Точечные проверки внутри хендлеров сохранены (defense in depth).
         _req = required_role_for(d)
         if _req == "full" and not self._is_full_access(q.from_user.id):
@@ -1281,6 +1280,12 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
             except Exception:
                 pass
             return
+
+        # Гейт пройден — гасим "часики" пустым ответом (первый и единственный).
+        try:
+            await q.answer()
+        except Exception:
+            pass
 
         # Само-синхронизация имени из Telegram (только если похоже на имя, не ник)
         if q.from_user.first_name and self._looks_like_name(q.from_user.first_name):

@@ -88,10 +88,10 @@ class BodyCompMixin:
     async def bc_team_athletes(self, update, ctx):
         """Список спортсменов команды с данными состава тела."""
         q = update.callback_query
-        await q.answer()
         team = q.data.replace("bc_team_", "")
         # Scope: тренер видит только свои команды (роль проверена гейтом
-        # диспетчера; админ/врач — без ограничений)
+        # диспетчера; админ/врач — без ограничений). Отказной алерт должен быть
+        # ПЕРВЫМ ответом на callback, поэтому q.answer() — только после проверки.
         _uid = q.from_user.id
         if not self._is_full_access(_uid) and team not in set(self.db.get_coach_teams(_uid)):
             logger.warning(f"Access denied (scope bc_team_): user {_uid}, team {team}")
@@ -100,6 +100,7 @@ class BodyCompMixin:
             except Exception:
                 pass
             return
+        await q.answer()
         athletes_with_data = self.db.get_bc_period(days=999)
 
         latest_by_athlete = {}
@@ -270,12 +271,12 @@ class BodyCompMixin:
     async def bc_view_athlete(self, update, ctx):
         """Карточка состава тела спортсмена (только врач/тренер), расширенные метрики."""
         q = update.callback_query
-        await q.answer()
         if not self._is_admin_or_coach(q.from_user.id):
             return
         athlete_id = int(q.data.replace("bc_view_", ""))
         # Scope: тренер видит только спортсменов своих команд (роль проверена
-        # гейтом диспетчера; админ/врач — без ограничений)
+        # гейтом диспетчера; админ/врач — без ограничений). Отказной алерт должен
+        # быть ПЕРВЫМ ответом на callback, поэтому q.answer() — только после проверки.
         _uid = q.from_user.id
         if not self._is_full_access(_uid):
             _a = self.db.get_athlete_by_id(athlete_id)
@@ -286,6 +287,7 @@ class BodyCompMixin:
                 except Exception:
                     pass
                 return
+        await q.answer()
         history = self.db.get_body_composition(athlete_id, days=30)
         if not history:
             name = "спортсмен"

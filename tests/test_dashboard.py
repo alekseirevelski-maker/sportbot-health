@@ -92,7 +92,11 @@ class FakeQ:
         self.edits = []
 
     async def answer(self, *a, **k):
-        self.answers.append(a)
+        # Как настоящий Telegram: ответ на callback одноразовый —
+        # вторая попытка падает «Query is already answered».
+        if self.answers:
+            raise BadRequest("Query is already answered")
+        self.answers.append((a, k))
 
     async def edit_message_text(self, text, **kw):
         self.edits.append((text, kw))
@@ -235,7 +239,12 @@ def test_dash_today_denied_for_athlete(tmp_path, monkeypatch):
                              effective_user=SimpleNamespace(id=101))
     asyncio.run(obj.callback_handler(update, None))
 
-    assert any("Нет доступа" in str(a) for a in q.answers)
+    # Отказной алерт — ПЕРВЫЙ и единственный ответ (FakeQ кидает BadRequest
+    # на втором answer, как настоящий Telegram «Query is already answered»).
+    assert len(q.answers) == 1
+    args, kwargs = q.answers[0]
+    assert args == ("⛔ Нет доступа",)
+    assert kwargs.get("show_alert") is True
     assert not q.edits
 
 
