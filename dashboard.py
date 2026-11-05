@@ -40,6 +40,12 @@ def _clip(text: str, limit: int = _COMPLAINT_CLIP) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+def _md_escape(text: str) -> str:
+    """Экранирование Markdown-спецсимволов в свободном пользовательском вводе
+    (жалобы): иначе «Can't parse entities» роняет отправку всего экрана."""
+    return str(text).replace("*", "\\*").replace("_", "\\_").replace("[", "\\[")
+
+
 def _hooper_distress(survey: Dict) -> Optional[int]:
     """Классический Hooper Index по 3 шкалам опроса (больше = хуже), None если
     не все компоненты сданы (иначе сумма занижается и флаг ложный)."""
@@ -87,7 +93,8 @@ def _today_red_flags(survey: Dict, bl: Optional[Dict],
     if survey.get("pain_on_game"):
         flags.append("🏀 Болит на игре/тренировке")
     if survey.get("complaints"):
-        flags.append(f"💬 Жалобы: {_clip(survey['complaints'])}")
+        # экранируем только жалобу (свободный ввод); обрезка — до экранирования
+        flags.append(f"💬 Жалобы: {_md_escape(_clip(survey['complaints']))}")
     # Пульс вне индивидуального коридора 2 дня подряд (сегодня + вчера)
     thr = _hr_threshold(bl) if bl else None
     if thr is not None and prev is not None:

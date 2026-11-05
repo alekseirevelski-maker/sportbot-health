@@ -11,6 +11,8 @@ from collections import defaultdict
 from datetime import date, timedelta
 from types import SimpleNamespace
 
+from telegram.error import BadRequest
+
 from database import Database
 from dashboard import build_today_dashboard
 
@@ -299,3 +301,79 @@ def test_main_menu_athlete_does_not_see_dash_button(tmp_path, monkeypatch):
     markup = q.edits[0][1]["reply_markup"]
     all_cbs = [b.callback_data for row in markup.inline_keyboard for b in row]
     assert "dash_today" not in all_cbs
+
+
+# ==================== Fix round 1: BadRequest не глотается, жалобы экранируются ====================
+
+def test_markdown_complaints_escaped_in_text(tmp_path):
+    """Свободный ввод с Markdown-спецсимволами экранируется — экран не роняется."""
+    db = _make_db(tmp_path, "esc.db")
+    db.register_athlete(304, "markdown", "Маркдаунова Марка", "U17", TEAM_A)
+    aid = db.get_athlete_by_telegram_id(304)["id"]
+    db.save_survey(aid, {"sleep": 6, "fatigue": 6, "soreness": 6,
+                         "complaints": "*болит* _колено_ [ссылка](t.me)"})
+
+    text, _buttons = build_today_dashboard(db, DOCTOR_ID, db.get_all_athletes(), TODAY)
+
+    assert "\\*болит\\*" in text
+    assert "\\_колено\\_" in text
+    assert "\\[ссылка](t.me)" in text  # «]» не экранируем — не спецсимвол entity
+
+
+class FlakyQ(FakeQ):
+    """edit_message_text кидает BadRequest по сценарию (parse / not_modified)."""
+
+    def __init__(self, uid, fail_kind):
+        super().__init__(uid)
+        self.fail_kind = fail_kind
+        self.calls = []
+
+    async def edit_message_text(self, text, **kw):
+        self.calls.append(kw)
+        if self.fail_kind == "parse" and kw.get("parse_mode"):
+            raise BadRequest("Message can't be parsed: Can't parse entities")
+        if self.fail_kind == "not_modified" and len(self.calls) == 1:
+            raise BadRequest("Message is not modified")
+        self.edits.append((text, kw))
+
+
+def _run_handler(obj, q):
+    update = SimpleNamespace(callback_query=q, message=None,
+                             effective_user=SimpleNamespace(id=DOCTOR_ID))
+    asyncio.run(obj.show_today_dashboard(update, None))
+
+
+def test_handler_parse_badrequest_falls_back_without_parse_mode(tmp_path, monkeypatch, caplog):
+    """«Can't parse entities» → НЕ глотается: warning в логе + resend без parse_mode."""
+    import bot as bot_module
+    monkeypatch.setattr(bot_module, "ADMIN_TELEGRAM_IDS", {DOCTOR_ID})
+    db, _ids = _seed(tmp_path)
+    obj = _bot_obj(db)
+
+    q = FlakyQ(DOCTOR_ID, "parse")
+    _run_handler(obj, q)
+
+    # первая попытка с parse_mode упала, fallback доставил тот же текст без него
+    assert len(q.edits) == 1
+    text, kw = q.edits[0]
+    assert "parse_mode" not in kw
+    assert "Первая Больная" in text
+    # ошибка видна в логе (без PHI — только user_id)
+    assert any("Dashboard render failed" in r.getMessage()
+               and str(DOCTOR_ID) in r.getMessage()
+               for r in caplog.records)
+
+
+def test_handler_not_modified_badrequest_stays_silent(tmp_path, monkeypatch, caplog):
+    """«Message is not modified» (Обновить в пределах кэша) — штатно, без fallback/лога."""
+    import bot as bot_module
+    monkeypatch.setattr(bot_module, "ADMIN_TELEGRAM_IDS", {DOCTOR_ID})
+    db, _ids = _seed(tmp_path)
+    obj = _bot_obj(db)
+
+    q = FlakyQ(DOCTOR_ID, "not_modified")
+    _run_handler(obj, q)
+
+    assert len(q.calls) == 1        # повторной отправки не было
+    assert not q.edits
+    assert not any("Dashboard render failed" in r.getMessage() for r in caplog.records)

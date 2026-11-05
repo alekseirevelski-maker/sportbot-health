@@ -644,9 +644,24 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
             else:
                 await update.message.reply_text(
                     text, reply_markup=markup, parse_mode="Markdown")
-        except BadRequest:
-            # «Message is not modified» при «Обновить» в пределах кэша — не ошибка
-            pass
+        except BadRequest as e:
+            if "not modified" in str(e).lower():
+                # штатный «Обновить» в пределах кэша — контент тот же, не ошибка
+                return
+            # вероятная причина: неэкранированный Markdown в пользовательском
+            # вводе (жалобы/ФИО) — «Can't parse entities». Логируем (без PHI) и
+            # повторно отправляем тот же текст БЕЗ parse_mode, чтобы экран
+            # гарантированно отрисулся.
+            logger.warning(f"Dashboard render failed (user_id={user_id}): {e}; "
+                           f"fallback without parse_mode")
+            try:
+                if update.callback_query:
+                    await update.callback_query.edit_message_text(
+                        text, reply_markup=markup)
+                else:
+                    await update.message.reply_text(text, reply_markup=markup)
+            except Exception as e2:
+                logger.error(f"Dashboard fallback failed (user_id={user_id}): {e2}")
 
     async def handle_text(self, update, ctx):
         user_id = update.effective_user.id
