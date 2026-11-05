@@ -20,7 +20,7 @@ class RegistrationMixin:
 
     async def cmd_start(self, update, ctx):
         user = update.effective_user
-        logger.info(f"cmd_start called by {user.id} ({user.username})")
+        logger.info(f"cmd_start called by uid={user.id}")
         # Восстановить сессию из БД (переживает рестарт), если существует
         try:
             await self.restore_user_state(user.id)

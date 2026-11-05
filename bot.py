@@ -1262,7 +1262,7 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                 pass
             return
         d = q.data
-        logger.info(f"Callback: {d} from {q.from_user.id}")
+        logger.debug("Callback: %s uid=%s", d, q.from_user.id)
 
         # Default-deny гейт ролей (access_control.py) — ДО любого роутинга.
         # Точечные проверки внутри хендлеров сохранены (defense in depth).
@@ -1959,7 +1959,7 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                 await self._mark_bot_blocked(a)
             except Exception as e:
                 failed += 1
-                logger.error(f"Weekly report error for {a.get('full_name', '?')} (tg={a.get('telegram_id')}): {e}")
+                logger.error(f"Weekly report error for athlete #{a.get('id')}: {e}")
         logger.info(f"Weekly reports sent={sent} failed={failed} of {len(athletes)}")
 
     @staticmethod

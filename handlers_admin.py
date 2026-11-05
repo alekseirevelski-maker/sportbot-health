@@ -670,7 +670,7 @@ class AdminMixin:
                     await self._mark_bot_blocked(a)
                 except Exception as e:
                     failed += 1
-                    logger.error(f"Q-reminder error for {a['full_name']} (tg={a['telegram_id']}): {e}")
+                    logger.error(f"Q-reminder error for athlete #{a['id']}: {e}")
             logger.info(f"Questionnaire remind sent={sent} failed={failed} of {len(target)}")
             await q.edit_message_text(
                 f"✅ *Предложение отправлено:* {sent}\n"
