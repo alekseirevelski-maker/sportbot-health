@@ -12,7 +12,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.drawing.image import Image as XLImage
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import Forbidden, BadRequest
+from telegram.error import Forbidden, BadRequest, RetryAfter
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
@@ -35,7 +35,9 @@ from cycle_medicine import (
 from watch_parser import parse_watch
 from scale_csv_parser import parse_scale_csv_dated
 
-from validator import sanitize_text, validate_heart_rate, validate_age_ge14
+from validator import (
+    sanitize_text, validate_heart_rate, validate_age_ge14, parse_birth_date,
+)
 from access_control import required_role_for
 from dashboard import build_today_dashboard
 
@@ -93,6 +95,50 @@ BC_PROFILE_PAGE = 25
 
 
 # ==================== УТИЛИТЫ ====================
+
+def _reminder_should_fire_now(now_local, hour, minute) -> bool:
+    """Прошло ли уже сегодня локальное время напоминания (hour:minute)?
+
+    Сравнение ПОЛНОГО времени кортежем: старое условие
+    `hour >= H and minute >= M` ломалось на 21:10 vs 20:30 (10 < 30 → False),
+    из-за чего рестарт после времени рассылки не доотправлял напоминания.
+    """
+    return (now_local.hour, now_local.minute) >= (hour, minute)
+
+
+def validate_questionnaire_age(text) -> Tuple[bool, str]:
+    """Валидация возраста анкеты. Единый порог — 14 лет (и максимум 99):
+    берём из validator.validate_age_ge14; расхождение с лейблом группы
+    «U-14 (12-14 лет)» — осознанное решение (единый порог по всем командам)."""
+    try:
+        age = int(str(text).strip())
+    except (TypeError, ValueError):
+        return False, "❌ Введи возраст числом (например: 15)"
+    if age < 14:
+        return False, "❌ Регистрация с 14 лет"
+    if age > 99:
+        return False, "❌ Максимальный возраст 99 лет"
+    return True, f"✅ Возраст {age} лет"
+
+
+def validate_questionnaire_birth(text) -> Tuple[bool, str]:
+    """Валидация даты рождения анкеты (ДД.ММ.ГГГГ): календарная корректность
+    (validator.parse_birth_date) + возраст 14-99 (validator.validate_age_ge14)."""
+    raw = str(text or "").strip()
+    if parse_birth_date(raw) is None:
+        return False, "❌ Неверный формат даты. Введи ДД.ММ.ГГГГ (например 15.03.2008)"
+    return validate_age_ge14(raw)
+
+
+def validate_questionnaire_phone(text) -> Tuple[bool, str]:
+    """Валидация телефона анкеты: 10-15 цифр после снятия +/пробелов/скобок/дефисов."""
+    raw = str(text or "").strip()
+    digits = re.sub(r"[^0-9]", "", raw)
+    allowed = re.fullmatch(r"[0-9+\-()\s]{5,30}", raw)
+    if not allowed or not (10 <= len(digits) <= 15):
+        return False, "❌ Введи номер телефона (например: +7 900 123-45-67)"
+    return True, "✅ Номер принят"
+
 
 def sparkline(values, width=7):
     clean = [v for v in values if v is not None]
@@ -429,7 +475,10 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                 return
 
             # === Умные часы: обычный путь ===
-            watch_data = parse_watch(text_content, fname, raw_bytes=bytes(content))
+            # Парсинг CSV/файла часов — CPU/IO-работа: уводим из event loop
+            watch_data = await asyncio.to_thread(
+                parse_watch, text_content, fname, raw_bytes=bytes(content)
+            )
 
             if not watch_data:
                 await update.message.reply_text(
@@ -1017,30 +1066,29 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
 
         # Анкета: текстовые ответы
         if step == "q_age":
-            try:
-                age = int(text)
-                if age < 10 or age > 99: raise ValueError
-                state["q_data"]["age"] = str(age)
-                state["step"] = "q_phone"
-                await update.message.reply_text("📋 *Блок 1: Общие данные*\n\nВведи номер телефона:", parse_mode="Markdown")
-            except (ValueError, TypeError):
-                await update.message.reply_text("❌ Введи число от 10 до 99")
+            ok, msg = validate_questionnaire_age(text)
+            if not ok:
+                await update.message.reply_text(msg)
+                return
+            state["q_data"]["age"] = str(int(text.strip()))
+            state["step"] = "q_phone"
+            await update.message.reply_text("📋 *Блок 1: Общие данные*\n\nВведи номер телефона:", parse_mode="Markdown")
             return
 
         if step == "q_phone":
-            phone = text.strip()
-            if len(phone) < 5:
-                await update.message.reply_text("❌ Введи номер телефона (например: +7 900 123-45-67):")
+            ok, msg = validate_questionnaire_phone(text)
+            if not ok:
+                await update.message.reply_text(msg)
                 return
-            state["q_data"]["phone"] = phone
+            state["q_data"]["phone"] = text.strip()
             state["step"] = "q_birth_date"
             await update.message.reply_text("📋 *Блок 1: Общие данные*\n\nВведи дату рождения в формате *ДД.ММ.ГГГГ* (например: 15.03.2008):", parse_mode="Markdown")
             return
 
         if step == "q_birth_date":
-            import re as _re
-            if not _re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", text.strip()):
-                await update.message.reply_text("❌ Введи дату в формате *ДД.ММ.ГГГГ* (например: 15.03.2008):", parse_mode="Markdown")
+            ok, msg = validate_questionnaire_birth(text)
+            if not ok:
+                await update.message.reply_text(msg, parse_mode="Markdown")
                 return
             state["q_data"]["birth_date"] = text.strip()
             state["step"] = "q_gender"
@@ -1550,26 +1598,37 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
             pass
 
     async def _send_admin(self, admin_id, text, buttons=None):
-        """Отправить сообщение админу. При ошибке Button_user_privacy_restricted — без кнопок."""
+        """Отправить сообщение админу. При ошибке Button_user_privacy_restricted — без кнопок.
+        При 429/RetryAfter — сон на retry_after+1 и одна повторная попытка."""
         if TESTING:
             return
-        try:
-            bot = self._bot
-            reply_markup = self.kb(buttons) if buttons else None
-            await bot.send_message(
-                chat_id=admin_id, text=text, parse_mode="Markdown",
-                reply_markup=reply_markup
-            )
-        except Exception as e:
-            if "privacy_restricted" in str(e).lower() and buttons:
-                try:
-                    await bot.send_message(
-                        chat_id=admin_id, text=text, parse_mode="Markdown"
-                    )
-                except Exception as e2:
-                    logger.error(f"Send to admin {admin_id} (no buttons): {e2}")
-            else:
-                logger.error(f"Send to admin {admin_id}: {e}")
+        bot = self._bot
+        reply_markup = self.kb(buttons) if buttons else None
+        for _attempt in range(2):
+            try:
+                await bot.send_message(
+                    chat_id=admin_id, text=text, parse_mode="Markdown",
+                    reply_markup=reply_markup
+                )
+                return
+            except RetryAfter as e:
+                if _attempt == 0:
+                    logger.warning(f"Flood control для admin {admin_id}: сплю {e.retry_after}s")
+                    await asyncio.sleep(e.retry_after + 1)
+                    continue
+                logger.error(f"Send to admin {admin_id}: RetryAfter persists ({e})")
+                return
+            except Exception as e:
+                if "privacy_restricted" in str(e).lower() and buttons:
+                    try:
+                        await bot.send_message(
+                            chat_id=admin_id, text=text, parse_mode="Markdown"
+                        )
+                    except Exception as e2:
+                        logger.error(f"Send to admin {admin_id} (no buttons): {e2}")
+                else:
+                    logger.error(f"Send to admin {admin_id}: {e}")
+                return
 
     async def _mark_bot_blocked(self, a):
         """Спортсмен заблокировал бота (Forbidden): флаг bot_blocked=1, рассылки
@@ -1651,6 +1710,9 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
         if self.db.get_setting("reminder_sent_date") == _today:
             logger.info("Напоминание уже отправлено сегодня — пропускаю")
             return
+        # Дедуп-метку ставим ДО цикла рассылки: крах/рестарт посреди цикла
+        # не должен приводить к повторным сообщениям тем, кто уже получил.
+        self.db.set_setting("reminder_sent_date", _today)
 
         if TESTING:
             logger.info("TESTING MODE — напоминания и сводки не отправляются")
@@ -1674,20 +1736,30 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                 skipped += 1
                 continue
             try:
-                await bot.send_message(
-                    chat_id=a["telegram_id"],
-                    text=(
-                        "🏀 *ЧБК — Напоминание об опросе!*\n"
-                        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                        f"👋 Привет, {self._first_name(a)}!\n\n"
-                        "📝 *Ежедневный опрос ещё не пройден!*\n"
-                        "Всего 1 минута — и у доктора будут данные о твоём состоянии.\n\n"
-                        f"🔥 Твоя серия: *{a.get('survey_streak', 0)} дней*\n\n"
-                        "👉 Нажми /start чтобы открыть меню"
-                    ),
-                    parse_mode="Markdown"
-                )
-                sent += 1
+                # 429/RetryAfter: спим указанное Telegram время и одна повторная попытка
+                for _attempt in range(2):
+                    try:
+                        await bot.send_message(
+                            chat_id=a["telegram_id"],
+                            text=(
+                                "🏀 *ЧБК — Напоминание об опросе!*\n"
+                                "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                                f"👋 Привет, {self._first_name(a)}!\n\n"
+                                "📝 *Ежедневный опрос ещё не пройден!*\n"
+                                "Всего 1 минута — и у доктора будут данные о твоём состоянии.\n\n"
+                                f"🔥 Твоя серия: *{a.get('survey_streak', 0)} дней*\n\n"
+                                "👉 Нажми /start чтобы открыть меню"
+                            ),
+                            parse_mode="Markdown"
+                        )
+                        sent += 1
+                        break
+                    except RetryAfter as e:
+                        if _attempt == 0:
+                            logger.warning(f"Flood control для #{a['id']}: сплю {e.retry_after}s")
+                            await asyncio.sleep(e.retry_after + 1)
+                            continue
+                        logger.error(f"Reminder RetryAfter persists for athlete #{a['id']}: {e}")
             except Forbidden:
                 await self._mark_bot_blocked(a)
             except Exception as e:
@@ -1726,8 +1798,6 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                     logger.error(f"Admin summary error: {e}")
         except Exception as e:
             logger.error(f"Doctor summary error: {e}")
-
-        self.db.set_setting("reminder_sent_date", _today)
 
 
     async def _check_trend_alerts(self, context):
@@ -1856,7 +1926,9 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                 from weekly_report import generate_weekly_report
                 # ранг без эмодзи (PIL не рисует цветные эмодзи)
                 plain_rank = get_rank_plain(a.get("survey_streak", 0))
-                path = generate_weekly_report(
+                # Генерация картинки (PIL) — блокирующая: уводим в поток
+                path = await asyncio.to_thread(
+                    generate_weekly_report,
                     full_name=a["full_name"],
                     age_group=a.get("age_group", "?"),
                     team=a.get("team", "?"),
@@ -1984,7 +2056,7 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
             logger.info(f"Ежедневные напоминания настроены на {REMINDER_HOUR:02d}:{REMINDER_MINUTE:02d}")
             
             # Если время уже прошло сегодня — отправляем сразу
-            if now_local.hour >= REMINDER_HOUR and now_local.minute >= REMINDER_MINUTE:
+            if _reminder_should_fire_now(now_local, REMINDER_HOUR, REMINDER_MINUTE):
                 logger.info("Время напоминания уже прошло сегодня — отправляю сразу")
                 # Запускаем через 3 секунды, чтобы бот успел инициализироваться
                 app.job_queue.run_once(self._send_daily_reminder, 3, name="initial_reminder")
@@ -2041,7 +2113,7 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
             logger.warning(f"Coach summary not scheduled: {e}")
 
         logger.info("Бот v3.0 запущен!")
-        app.run_polling(drop_pending_updates=False)
+        app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":

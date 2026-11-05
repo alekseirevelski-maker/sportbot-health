@@ -3,6 +3,7 @@
 Автоматически извлечён из bot.py
 """
 
+import asyncio
 import csv
 import io
 import logging
@@ -470,7 +471,7 @@ class ReportsMixin:
 
         # Убираем move_worksheet - Сводка уже первый лист
         output = io.BytesIO()
-        wb.save(output)
+        await asyncio.to_thread(wb.save, output)
         output.seek(0)
         await q.message.reply_document(
             document=output,
@@ -768,7 +769,7 @@ class ReportsMixin:
 
         # ---- Сохраняем и отправляем ----
         output = io.BytesIO()
-        wb.save(output)
+        await asyncio.to_thread(wb.save, output)
         output.seek(0)
         await q.message.reply_document(
             document=output,
@@ -1064,7 +1065,7 @@ class ReportsMixin:
             lr += 1
 
         output = io.BytesIO()
-        wb.save(output)
+        await asyncio.to_thread(wb.save, output)
         output.seek(0)
         await q.message.reply_document(
             document=output,
@@ -1283,7 +1284,7 @@ class ReportsMixin:
             lr += 1
 
         output = io.BytesIO()
-        wb.save(output)
+        await asyncio.to_thread(wb.save, output)
         output.seek(0)
         await q.message.reply_document(
             document=output,
