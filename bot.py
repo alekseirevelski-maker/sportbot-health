@@ -12,7 +12,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.drawing.image import Image as XLImage
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import Forbidden
+from telegram.error import Forbidden, BadRequest
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
@@ -37,6 +37,7 @@ from scale_csv_parser import parse_scale_csv_dated
 
 from validator import sanitize_text, validate_heart_rate, validate_age_ge14
 from access_control import required_role_for
+from dashboard import build_today_dashboard
 
 if PROXY_URL:
     os.environ["http_proxy"] = PROXY_URL
@@ -614,6 +615,38 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
 
     def _coach_teams(self, user_id):
         return set(self.db.get_coach_teams(user_id))
+
+    async def show_today_dashboard(self, update, ctx):
+        """Дашборд «🔔 На сегодня» (роль уже гейтится callback-гейтом: dash_ → coach).
+
+        Тяжёлая сборка — в отдельном потоке (batch-запросы в dashboard.py),
+        результат кэшируется на 60 с: ключ — (scope спортсмена, минутный бакет),
+        один слот (две минуты/scope не накапливаем — нечему течь)."""
+        user_id = update.effective_user.id
+        scoped = self._scoped_athletes(user_id)
+        cache = getattr(self, "_dash_cache", None)
+        if cache is None:
+            cache = self._dash_cache = {}
+        key = (frozenset(a["id"] for a in scoped), int(time.time() // 60))
+        result = cache.get("val") if cache.get("key") == key else None
+        if result is None:
+            result = await asyncio.to_thread(
+                build_today_dashboard, self.db, user_id, scoped, date.today())
+            cache.clear()
+            cache["key"] = key
+            cache["val"] = result
+        text, buttons = result
+        markup = self.kb(buttons)
+        try:
+            if update.callback_query:
+                await update.callback_query.edit_message_text(
+                    text, reply_markup=markup, parse_mode="Markdown")
+            else:
+                await update.message.reply_text(
+                    text, reply_markup=markup, parse_mode="Markdown")
+        except BadRequest:
+            # «Message is not modified» при «Обновить» в пределах кэша — не ошибка
+            pass
 
     async def handle_text(self, update, ctx):
         user_id = update.effective_user.id
@@ -1199,6 +1232,8 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
         try:
             if d == "main_menu":
                 await self.show_main_menu(update, ctx)
+            elif d == "dash_today":
+                await self.show_today_dashboard(update, ctx)
             elif d == "consent_accept":
                 # регистрируем согласие и переходим к выбору возрастной группы
                 self.db.record_consent(q.from_user.id)

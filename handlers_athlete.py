@@ -38,6 +38,9 @@ class AthleteMixin:
                 buttons.insert(0, [(f"📋 Отчет для врача", "admin_report")])
                 buttons.insert(1, [(f"⚙️ Управление", "admin_manage")])
                 buttons.insert(2, [(f"⚖️ Весы и состав тела", "bc_menu")])
+            # Дашборд «На сегодня» — первая строка меню тренера/врача (роль гейтится)
+            if self._is_admin_or_coach(user.id):
+                buttons.insert(0, [(f"🔔 На сегодня", "dash_today")])
             buttons.append([(f"❓ Помощь", "help_menu")])
             if update.callback_query:
                 await update.callback_query.edit_message_text(text, reply_markup=self.kb(buttons), parse_mode="Markdown")
@@ -121,6 +124,8 @@ class AthleteMixin:
             buttons.insert(1, [(f"📊 Экспорт в Excel", "report_export_menu")])
             buttons.insert(2, [(f"⚖️ Весы и состав тела", "bc_menu")])
             buttons.insert(3, [(f"⚙️ Управление", "admin_manage")])
+            # Дашборд «На сегодня» — первая строка меню (роль гейтится)
+            buttons.insert(0, [(f"🔔 На сегодня", "dash_today")])
 
         if update.callback_query:
             await update.callback_query.edit_message_text(text, reply_markup=self.kb(buttons), parse_mode="Markdown")
