@@ -205,3 +205,60 @@ def test_cmd_start_no_notification_when_not_blocked(tmp_path, monkeypatch):
     asyncio.run(obj.cmd_start(update, None))
 
     assert not any("снова с ботом" in t for _, t in fake.sent)
+
+
+# ==================== Рассылка анкет (handlers_admin) ====================
+
+class FakeQ:
+    def __init__(self, uid=ADMIN_ID):
+        self.texts = []
+        self.from_user = SimpleNamespace(id=uid)
+
+    async def answer(self, *a, **k):
+        pass
+
+    async def edit_message_text(self, text, **kw):
+        self.texts.append(text)
+
+
+def _run_questionnaire_reminder(db, fake, monkeypatch, uid=999):
+    import bot as bot_module
+    monkeypatch.setattr(bot_module, "TESTING", False)
+    monkeypatch.setattr(bot_module, "ADMIN_TELEGRAM_IDS", {uid})
+    obj = _make_bot_obj(db, fake)
+    q = FakeQ()
+    update = SimpleNamespace(callback_query=q, effective_user=SimpleNamespace(id=uid))
+    asyncio.run(obj.send_questionnaire_reminder(update, SimpleNamespace(bot=fake)))
+    return q
+
+
+def test_questionnaire_reminder_forbidden_sets_flag_and_notifies(tmp_path, monkeypatch):
+    """Рассылка анкет: Forbidden -> флаг только блокировщику, второму отправлено,
+    ровно одно уведомление врачу."""
+    db = Database(db_path=str(tmp_path / "t8.db"))
+    aid_blocker, aid_good = _seed_two_athletes(db)
+    fake = FakeBot(blocked_chat_ids={111})
+
+    _run_questionnaire_reminder(db, fake, monkeypatch)
+
+    assert db.get_bot_blocked(aid_blocker) == 1
+    assert db.get_bot_blocked(aid_good) == 0
+    assert any(cid == 222 for cid, _ in fake.sent)
+    assert not any(cid == 111 for cid, _ in fake.sent)
+    admin_alerts = [t for cid, t in fake.sent
+                    if cid == ADMIN_ID and "заблокировал бота" in t]
+    assert len(admin_alerts) == 1
+
+
+def test_questionnaire_reminder_skips_already_blocked(tmp_path, monkeypatch):
+    """bot_blocked==1 -> пропускаем ДО отправки, без повторных уведомлений."""
+    db = Database(db_path=str(tmp_path / "t9.db"))
+    aid_blocker, _ = _seed_two_athletes(db)
+    db.set_bot_blocked(aid_blocker, 1)
+    fake = FakeBot(blocked_chat_ids={111})
+
+    _run_questionnaire_reminder(db, fake, monkeypatch)
+
+    assert 111 not in fake.attempted
+    assert any(cid == 222 for cid, _ in fake.sent)
+    assert not any("заблокировал бота" in t for _, t in fake.sent)

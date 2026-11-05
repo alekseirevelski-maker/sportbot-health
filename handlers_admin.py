@@ -6,6 +6,7 @@
 import logging
 from datetime import date
 from typing import TYPE_CHECKING
+from telegram.error import Forbidden
 from contact_ui import contact_row
 from config import AGE_GROUPS, ADMIN_IDS, REMINDER_HOUR_DEFAULT, REMINDER_MINUTE_DEFAULT
 from database import TEAMS
@@ -648,6 +649,8 @@ class AdminMixin:
             sent = 0
             failed = 0
             for a in target:
+                if a.get("bot_blocked"):
+                    continue
                 try:
                     await bot.send_message(
                         chat_id=a["telegram_id"],
@@ -663,6 +666,8 @@ class AdminMixin:
                         parse_mode="Markdown"
                     )
                     sent += 1
+                except Forbidden:
+                    await self._mark_bot_blocked(a)
                 except Exception as e:
                     failed += 1
                     logger.error(f"Q-reminder error for {a['full_name']} (tg={a['telegram_id']}): {e}")
