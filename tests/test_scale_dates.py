@@ -7,13 +7,14 @@
     "10/12/2026 16:33:00"   -> 2026-12-10   (будущее → «последний замер» = старый)
 Последствия для людей: виден только последний замер и перевёрнутый тренд.
 
-Запуск: python3 test_scale_dates.py  (из каталога бота, код возврата 0 = ок)
+Запуск: python3 tests/test_scale_dates.py  (из каталога бота, код возврата 0 = ок)
+или автоматически: python3 -m pytest tests/ (см. pytest.ini — только каталог tests/)
 """
 import os
 import sys
 from datetime import date, datetime
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scale_csv_parser import _parse_record_datetime, parse_scale_csv_dated  # noqa: E402
 
 # Реальные форматы экспортов MovingLife / GARLYN (взяты из логов бота 12.10.2026):
@@ -98,6 +99,11 @@ def main():
     print(f"OK: дат проверено {len(EXACT)}, оба варианта CSV разобраны верно "
           f"({datetime.now().strftime('%d.%m.%Y %H:%M')})")
     return 0
+
+
+def test_scale_dates_regression():
+    """pytest-вход: даты обоих вариантов CSV разбираются без мусора."""
+    assert main() == 0
 
 
 if __name__ == "__main__":
