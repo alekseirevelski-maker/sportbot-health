@@ -95,7 +95,7 @@ def test_import_scale_records_stores_author(tmp_path, monkeypatch):
     # в healthdata.csv колонки профиля нет → раскладка вручную (forced_athlete_id)
     upd, _ = _msg_update(DOCTOR_ID)
     obj = _bot_obj(db)
-    saved, skipped, unmapped, rows = asyncio.run(
+    saved, skipped, unmapped, rows, foreign = asyncio.run(
         obj._import_scale_records(upd, None, recs, forced_athlete_id=aid))
     assert saved == len(recs)
     stored = db.get_body_composition(aid, days=999)

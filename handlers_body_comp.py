@@ -17,6 +17,111 @@ if TYPE_CHECKING:
     from bot import SportHealthBot
 
 
+# Окно просмотра замеров — ОДНО на все экраны (карточка врача/тренера, «состав
+# тела» спортсмена, «динамика», «история», блок в профиле). Раньше карточка
+# читала 30 дней, а список «кто взвесился» — 999: у 24 из 27 карточка отвечала
+# «нет данных», хотя история в базе была. Взвешивания раз в 1-2 месяца → окно сезона.
+BC_WINDOW_DAYS = 365
+# Список «кто взвесился» — все, у кого хоть когда-то был замер.
+BC_LIST_WINDOW_DAYS = 999
+
+# Как подписывать метрику: (ключ, подпись, единица). Единица None = «брать из
+# строки»: костную массу приложение весов в одном экспорте отдаёт в кг, в другом
+# в %. Неизвестную единицу показываем честно, без «кг»: экран медицинский.
+BC_METRICS_SPEC = (
+    ("weight_kg", "Вес", "кг"),
+    ("bmi", "ИМТ", ""),
+    ("body_fat_pct", "Жир", "%"),
+    ("muscle_mass_kg", "Мышцы", "%"),
+    ("skeletal_muscle_pct", "Скелетные мышцы", "%"),
+    ("body_water_pct", "Вода", "%"),
+    ("bone_mass_kg", "Кости", None),
+    ("visceral_fat_index", "Висц. жир", ""),
+    ("subcutaneous_fat_pct", "Подкож. жир", "%"),
+    ("lean_mass_kg", "Безжировая", "кг"),
+    ("protein_pct", "Белок", "%"),
+    ("bmr_kcal", "BMR", "ккал"),
+)
+
+# Набор метрик на экране «Состав тела» спортсмена — тот же, что был, но с
+# общими подписями/единицами.
+BC_ATHLETE_METRIC_KEYS = ("weight_kg", "body_fat_pct", "muscle_mass_kg", "body_water_pct",
+                          "bone_mass_kg", "visceral_fat_index", "bmr_kcal")
+
+
+def _bc_unit_for(key: str, row: dict) -> str:
+    """Единица метрики по правилу: из строки для костей, иначе из спецификации."""
+    for k, _label, unit in BC_METRICS_SPEC:
+        if k != key:
+            continue
+        if unit is not None:
+            return unit
+        recorded = (row.get("bone_unit") or "").strip()
+        return recorded or "не подтверждена"
+    return ""
+
+
+def format_bc_metrics(row: dict) -> list:
+    """Строки метрик по единому правилу: порядок, подписи, единицы.
+
+    None пропускаем (не «0» и не прочерк). Для костей единица берётся из записи;
+    если её нет — пометка, что единица не подтверждена.
+    """
+    lines = []
+    for key, label, _unit in BC_METRICS_SPEC:
+        v = row.get(key)
+        if v is None:
+            continue
+        try:
+            num = float(v)
+        except (TypeError, ValueError):
+            continue
+        unit = _bc_unit_for(key, row)
+        if key == "bone_mass_kg" and unit == "не подтверждена":
+            lines.append(f"• {label}: *{num:.1f}* (единица не подтверждена)")
+        else:
+            lines.append(f"• {label}: *{num:.1f}* {unit}".rstrip())
+    return lines
+
+
+def _bc_pairs_for_athlete(latest: dict, prev) -> list:
+    """(значение, предыдущее, подпись, единица) для экрана спортсмена."""
+    labels = {k: label for k, label, _u in BC_METRICS_SPEC}
+    out = []
+    for key in BC_ATHLETE_METRIC_KEYS:
+        out.append((latest.get(key), (prev or {}).get(key), labels[key],
+                    _bc_unit_for(key, latest)))
+    return out
+
+
+def slot_number(name) -> int:
+    """Номер пользовательского слота весов из его подписи.
+
+    Приложение MovingLife подписывает слот «Данные пользователя 12», экран
+    «Профили весов» создаёт «Профиль 12» — номер один и тот же, строка нет.
+    Число считается только как отдельное число (не «2026» из года). 0 = не распознано.
+    """
+    import re as _re
+    m = _re.search(r"(?<!\d)(\d{1,3})(?!\d)", str(name or ""))
+    return int(m.group(1)) if m else 0
+
+
+def scale_profile_lookup(mapping: dict, prof: str):
+    """Спортсмен по подписи слота: сначала точное имя, затем номер слота.
+
+    Совпадение по номеру допускается только когда номеру в таблице соответствует
+    ровно один спортсмен; иначе не гадаем — это медицинские данные.
+    """
+    aid = mapping.get(prof)
+    if aid is not None:
+        return aid
+    num = slot_number(prof)
+    if not num:
+        return None
+    hits = {v for k, v in mapping.items() if slot_number(k) == num}
+    return hits.pop() if len(hits) == 1 else None
+
+
 class BodyCompMixin:
     """Миксин для bodycomp."""
 
@@ -27,7 +132,7 @@ class BodyCompMixin:
         if not self._is_admin_or_coach(q.from_user.id):
             return
 
-        athletes_with_data = self.db.get_bc_period(days=999)
+        athletes_with_data = self.db.get_bc_period(days=BC_LIST_WINDOW_DAYS)
         if not athletes_with_data:
             await q.edit_message_text(
                 "📈 *Кто взвесился*\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -109,7 +214,7 @@ class BodyCompMixin:
             await q.answer()
         except Exception:
             pass  # обычно «Query is already answered» от диспетчера — не ошибка
-        athletes_with_data = self.db.get_bc_period(days=999)
+        athletes_with_data = self.db.get_bc_period(days=BC_LIST_WINDOW_DAYS)
 
         latest_by_athlete = {}
         for row in athletes_with_data:
@@ -157,7 +262,7 @@ class BodyCompMixin:
         """Плоский список всех спортсменов с данными (все команды)."""
         q = update.callback_query
         await q.answer()
-        athletes_with_data = self.db.get_bc_period(days=999)
+        athletes_with_data = self.db.get_bc_period(days=BC_LIST_WINDOW_DAYS)
 
         latest_by_athlete = {}
         for row in athletes_with_data:
@@ -313,7 +418,7 @@ class BodyCompMixin:
             await q.answer()
         except Exception:
             pass  # обычно «Query is already answered» от диспетчера — не ошибка
-        history = self.db.get_body_composition(athlete_id, days=30)
+        history = self.db.get_body_composition(athlete_id, days=BC_WINDOW_DAYS)
         if not history:
             name = "спортсмен"
             try:
@@ -336,27 +441,11 @@ class BodyCompMixin:
             pass
         lines = [f"⚖️ *Состав тела — {name}*", "━━━━━━━━━━━━━━━━━━━━━━━━━━"]
         latest = history[0]
-        metrics = [
-            ("Вес", latest.get("weight_kg"), "кг"),
-            ("ИМТ", latest.get("bmi"), ""),
-            ("Жир", latest.get("body_fat_pct"), "%"),
-            ("Мышцы", latest.get("muscle_mass_kg"), "%"),
-            ("Вода", latest.get("body_water_pct"), "%"),
-            ("Кости", latest.get("bone_mass_kg"), "кг"),
-            ("Висц. жир", latest.get("visceral_fat_index"), ""),
-            ("Подкож. жир", latest.get("subcutaneous_fat_pct"), "%"),
-            ("Безжировая", latest.get("lean_mass_kg"), "кг"),
-            ("Белок", latest.get("protein_pct"), "%"),
-            ("BMR", latest.get("bmr_kcal"), "ккал"),
-        ]
-        for label, v, unit in metrics:
-            if v is not None:
-                num = float(v)
-                lines.append(f"• {label}: *{num:.1f}* {unit}".rstrip())
-        lines.append(f"\n📅 Замеров за 30 дней: {len(history)}")
+        lines.extend(format_bc_metrics(latest))
+        lines.append(f"\n📅 Замеров за {BC_WINDOW_DAYS} дней: {len(history)}")
         lines.append(f"(последний: {latest.get('record_date')})")
         # тренд веса
-        trend = self.db.get_bc_trend(athlete_id, 30)
+        trend = self.db.get_bc_trend(athlete_id, BC_WINDOW_DAYS)
         wt = trend.get("weight_kg", [])
         if len(wt) >= 2:
             d = wt[-1][1] - wt[0][1]
@@ -382,14 +471,33 @@ class BodyCompMixin:
         return f"  📅 {date_s}: " + ", ".join(parts) if parts else f"  📅 {date_s}: —"
 
 
-    async def _import_scale_records(self, update, ctx, records, forced_athlete_id=None):
-        """Разложить спарсенные CSV записи весов по спортсменам и сохранить.
-        Возвращает (записано, пропущено, unmapped_profiles, rows_text)."""
+    def _scale_athlete_label(self, athlete_id) -> str:
+        a = self.db.get_athlete_by_id(athlete_id)
+        return (a.get("full_name") if a and a.get("full_name") else f"#{athlete_id}")
+
+    async def _import_scale_records(self, update, ctx, records, forced_athlete_id=None,
+                                    preview_only=False):
+        """Разложить CSV записей весов по спортсменам (опционально — сохранить).
+
+        Возвращает (записано, пропущено, unmapped-профили, rows, foreign-профили).
+
+        Правило одно для всех ролей:
+         * врач/админ (full access) раскладывает всю базу и пишет сразу;
+         * тренер пишет только своих спортсменов и только после подтверждения
+           раскладки: preview_only=True считает раскладку, ничего не записывая
+           (в «saved» тогда считается «будет записано»);
+         * строки чужих команд уходят в foreign и не пишутся никогда — раньше их
+           можно было молча залить в чужую историю;
+         * профиль без привязки — unmapped, тоже не пишется.
+        """
         user_id = update.effective_user.id
         mapping = self.db.get_scale_profiles()
+        full_access = self._is_full_access(user_id)
+        scope_ids = None if full_access else {a["id"] for a in self._scoped_athletes(user_id)}
         saved = 0
         skipped = 0
         unmapped = []
+        foreign = []
         rows = []
         height_cache = {}
         for r in records:
@@ -397,12 +505,25 @@ class BodyCompMixin:
             # athlete_id: либо явный (forced), либо через маппинг профиля
             athlete_id = forced_athlete_id
             if athlete_id is None and prof:
-                athlete_id = mapping.get(prof)
+                athlete_id = scale_profile_lookup(mapping, prof)
             if athlete_id is None:
                 # нет привязки — копим на маппинг
                 if prof and prof not in unmapped:
                     unmapped.append(prof)
                 skipped += 1
+                if preview_only:
+                    rows.append(f"• {prof or 'без профиля'} → профиль не закреплён, "
+                                f"записано не будет")
+                continue
+            if scope_ids is not None and athlete_id not in scope_ids:
+                tag = prof or f"#{athlete_id}"
+                if tag not in foreign:
+                    foreign.append(tag)
+                skipped += 1
+                if preview_only:
+                    rows.append(f"• {prof or 'без профиля'} → ⛔ чужая команда "
+                                f"({self._scale_athlete_label(athlete_id)}), "
+                                f"записано не будет")
                 continue
             # рост из анкеты (кэш)
             if athlete_id not in height_cache:
@@ -414,6 +535,12 @@ class BodyCompMixin:
             data = dict(r)
             if height_cache.get(athlete_id):
                 data.setdefault("height_cm", height_cache[athlete_id])
+            if preview_only:
+                saved += 1
+                rows.append(f"• {prof or 'без профиля'} → "
+                            f"{self._scale_athlete_label(athlete_id)}: "
+                            f"{self._scale_summary_line(r).strip()}")
+                continue
             # recorded_by — отдельный аргумент сохранения; раньше его клали только в
             # data-словарь, из-за чего автор замера в проде не записан НИ РАЗУ.
             ok = self.db.save_body_composition(athlete_id, r.get("record_date"), data,
@@ -424,7 +551,7 @@ class BodyCompMixin:
                 rows.append(f"👤 {athlete_id}: {self._scale_summary_line(r)}")
             else:
                 skipped += 1
-        return saved, skipped, unmapped, rows
+        return saved, skipped, unmapped, rows, foreign
 
     # ==================== АНАЛИЗ СОСТАВА ТЕЛА + УВЕДОМЛЕНИЯ ====================
 
@@ -775,13 +902,15 @@ class BodyCompMixin:
         records = state.get("data", {}).get("bc_pending") or []
         self.clear_state(user_id)
         if records:
-            saved, skipped, unmapped, rows = await self._import_scale_records(
+            saved, skipped, unmapped, rows, foreign = await self._import_scale_records(
                 update, ctx, records, forced_athlete_id=None)
             head = [f"✅ Рост сохранён: {int(h)} см", "━━━━━━━━━━━━━━━━━━━━━━━━━━"]
             if rows:
                 head.append(f"⚖️ Сохранено: *{saved}* записей состава тела")
             if skipped:
                 head.append(f"⚠️ Пропущено: {skipped}")
+            if foreign:
+                head.append("⛔ Чужие профили: " + ", ".join(foreign[:5]))
             await update.message.reply_text(
                 "\n".join(head),
                 reply_markup=self.kb([[(f"🏠 Главное меню", "main_menu")]]),
@@ -815,7 +944,7 @@ class BodyCompMixin:
             return
 
         # Дельта с предыдущего замера
-        history = self.db.get_body_composition(athlete["id"], days=365)
+        history = self.db.get_body_composition(athlete["id"], days=BC_WINDOW_DAYS)
         prev = history[1] if len(history) > 1 else None
 
         def delta_str(cur, prv, unit=""):
@@ -832,19 +961,10 @@ class BodyCompMixin:
             f"⚖️ *Состав тела*\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n",
             f"📅 Последний замер: *{latest.get('record_date')}*\n"
         ]
-        metrics = [
-            ("Вес", latest.get("weight_kg"), "кг", prev.get("weight_kg") if prev else None),
-            ("Жир", latest.get("body_fat_pct"), "%", prev.get("body_fat_pct") if prev else None),
-            ("Мышцы", latest.get("muscle_mass_kg"), "%", prev.get("muscle_mass_kg") if prev else None),
-            ("Вода", latest.get("body_water_pct"), "%", prev.get("body_water_pct") if prev else None),
-            ("Кости", latest.get("bone_mass_kg"), "кг", prev.get("bone_mass_kg") if prev else None),
-            ("Висц. жир", latest.get("visceral_fat_index"), "", prev.get("visceral_fat_index") if prev else None),
-            ("BMR", latest.get("bmr_kcal"), "ккал", prev.get("bmr_kcal") if prev else None),
-        ]
-        for label, v, unit, pv in metrics:
+        for v, pv, label, unit in _bc_pairs_for_athlete(latest, prev):
             if v is not None:
-                d = delta_str(v, pv)
-                lines.append(f"• {label}: *{float(v):.1f}* {unit}{d}")
+                lines.append(f"• {label}: *{float(v):.1f}* {unit}"
+                             f"{delta_str(v, pv)}")
         if prev:
             lines.append(f"\n_Дельта с {prev.get('record_date')}_")
 
@@ -854,7 +974,7 @@ class BodyCompMixin:
             "• Жир — % подкожного жира\n"
             "• Мышцы — мышечная масса (% от массы тела)\n"
             "• Вода — % воды в организме\n"
-            "• Кости — минеральная масса (кг)\n"
+            "• Кости — костная масса; единицу берём из файла весов (кг или %)\n"
             "• Висц. жир — висцеральный жир (0-20)\n"
             "• BMR — базовый метаболизм (ккал/день)\n"
             "• AMR — активный метаболизм (ккал/день)"
@@ -880,7 +1000,7 @@ class BodyCompMixin:
         athlete = self.db.get_athlete_by_telegram_id(q.from_user.id)
         if not athlete:
             return
-        history = self.db.get_body_composition(athlete["id"], days=365)
+        history = self.db.get_body_composition(athlete["id"], days=BC_WINDOW_DAYS)
         if not history:
             await q.edit_message_text(
                 "📜 *История состава тела*\n\nПока нет данных.",
@@ -920,7 +1040,7 @@ class BodyCompMixin:
         athlete = self.db.get_athlete_by_telegram_id(q.from_user.id)
         if not athlete:
             return
-        history = self.db.get_body_composition(athlete["id"], days=365)
+        history = self.db.get_body_composition(athlete["id"], days=BC_WINDOW_DAYS)
         if not history:
             await q.edit_message_text(
                 "📊 *Динамика*\n\nПока нет данных. Загрузи CSV-файл.",
@@ -1031,6 +1151,61 @@ class BodyCompMixin:
                                       reply_markup=self.kb([[(f"🏠 Главное меню", "main_menu")]]))
 
 
+    async def bc_import_confirm(self, update, ctx):
+        """Тренер подтвердил раскладку группового CSV — пишем только своих."""
+        q = update.callback_query
+        if not self._is_admin_or_coach(q.from_user.id):
+            logger.warning(f"Access denied (bc_import_confirm): {q.from_user.id}")
+            try:
+                await q.answer("⛔ Нет доступа", show_alert=True)
+            except Exception:
+                pass
+            return
+        try:
+            await q.answer()
+        except Exception:
+            pass
+        state = self.get_state(q.from_user.id)
+        records = (state.get("data") or {}).get("pending_scale_records") or []
+        self.clear_state(q.from_user.id)
+        if not records:
+            # после рестарта RAM-state пуст: молча «ничего не сделал» — плохой ответ
+            await q.edit_message_text(
+                "⚖️ Данные устарели (возможно, бот перезагружался).\n"
+                "Отправь CSV заново.",
+                reply_markup=self.kb([[(f"🏠 Главное меню", "main_menu")]]))
+            return
+        saved, skipped, unmapped, rows, foreign = await self._import_scale_records(
+            update, ctx, records)
+        head = ["⚖️ *Импорт весов (CSV)*", "━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                f"✅ Записано: *{saved}* записей"]
+        if skipped:
+            head.append(f"⚠️ Не записано: *{skipped}* (чужие команды / профиль без привязки)")
+        if foreign:
+            head.append("⛔ Чужие профили: " + ", ".join(foreign[:5]))
+        if unmapped:
+            head.append("🗂 Не закреплено: " + ", ".join(unmapped[:5]))
+        head.append("")
+        head.extend(rows[:12])
+        if len(rows) > 12:
+            head.append(f"… и ещё {len(rows) - 12}")
+        await q.edit_message_text("\n".join(head),
+                                  reply_markup=self.kb([[(f"🏠 Главное меню", "main_menu")]]),
+                                  parse_mode="Markdown")
+
+    async def bc_import_cancel(self, update, ctx):
+        """Отмена тренерского импорта: в базу не попадает ничего."""
+        q = update.callback_query
+        try:
+            await q.answer()
+        except Exception:
+            pass
+        self.clear_state(q.from_user.id)
+        await q.edit_message_text("❌ Импорт отменён — в базу не записано ничего.\n"
+                                  "Можно отправить файл заново.",
+                                  reply_markup=self.kb([[(f"🏠 Главное меню", "main_menu")]]))
+
+
     async def scale_import_menu(self, update, ctx):
         """Пункт меню врача/тренера — веса и состав тела."""
         q = update.callback_query
@@ -1057,7 +1232,7 @@ class BodyCompMixin:
     def _bc_trend_block(self, athlete_id):
         """Короткий блок тренда массы из весов (для профиля спортсмена — только вес, без психологизации)."""
         try:
-            trend = self.db.get_bc_trend(athlete_id, days=30)
+            trend = self.db.get_bc_trend(athlete_id, days=BC_WINDOW_DAYS)
             w = trend.get("weight_kg", [])
             if len(w) < 2:
                 return ""

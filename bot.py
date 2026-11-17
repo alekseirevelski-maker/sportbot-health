@@ -515,7 +515,7 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
         full_access = self._is_full_access(user_id)
         archive_upload(content or b"", fname, date.today(), base_dir=inbox_dir)
 
-        if not full_access:
+        if not full_access and not self._is_admin_or_coach(user_id):
             # спортсмен прислал свой файл — сохраняем на него (только одна точка замеров у него)
             athlete = self.db.get_athlete_by_telegram_id(user_id)
             if not athlete:
@@ -557,9 +557,40 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                 )
             return
 
-        # Врач/тренер: группа — раскладываем по профилям
-        saved, skipped, unmapped, rows = await self._import_scale_records(
-            update, ctx, records, forced_athlete_id=None)
+        # Врач раскладывает всю базу и пишет сразу. Тренер — только своих
+        # спортсменов и только после подтверждения раскладки на экране: файл
+        # сначала считается (preview_only), пишется по кнопке подтверждения.
+        # Раньше тренер либо заливал чужие замеры на себя, либо получал отказ
+        # без рабочего пути.
+        coach_only = (not full_access) and self.db.is_coach(user_id)
+        saved, skipped, unmapped, rows, foreign = await self._import_scale_records(
+            update, ctx, records, forced_athlete_id=None, preview_only=coach_only)
+
+        if coach_only:
+            state = self.get_state(user_id)
+            state["step"] = "bc_import_review"
+            state["data"]["pending_scale_records"] = records
+            try:
+                await self.persist_user_state(user_id)
+            except Exception:
+                pass  # без persist переживём: после рестарта подтверждение откажет
+            head = ["⚖️ *Проверь раскладку — пока не записано*", "━" * 26, ""]
+            head.extend(rows[:14])
+            if len(rows) > 14:
+                head.append(f"… и ещё {len(rows) - 14}")
+            head.append("")
+            head.append(f"К записи: *{saved}* · чужих профилей: *{len(foreign)}* · "
+                        f"без привязки: *{len(unmapped)}*")
+            head.append("Подтверждение обязательно — без него в базу не попадёт ничего.")
+            await update.message.reply_text(
+                "\n".join(head),
+                reply_markup=self.kb([
+                    [("✅ Подтвердить запись", "bc_import_confirm")],
+                    [("❌ Отмена", "bc_import_cancel")],
+                    [("🗂 Профили весов", "bc_profiles")],
+                    [("🔙 Назад", "bc_menu")]]),
+                parse_mode="Markdown")
+            return
 
         # Fallback: CSV без профиля — спросить для кого
         if saved == 0 and skipped > 0:
@@ -959,9 +990,12 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
             await self._bc_height_save(update, ctx, user_id, text)
             return
 
-        # Подсказка если вместо CSV отправлен текст
+        # Подсказка, если вместо CSV отправлен текст. В handle_text объекта q нет
+        # (это обработчик сообщений), поэтому отвечаем reply_text: раньше эти две
+        # ветки падали NameError, и вместо подсказки человек получал
+        # «Произошла ошибка».
         if step == "wait_scale_csv":
-            await q.edit_message_text(
+            await update.message.reply_text(
                 "⚠️ Отправь CSV-файл, а не текст.\n"
                 "Вернись в меню состава тела и нажми «📤 Загрузить данные».",
                 reply_markup=self.kb([[(f"⚖️ Состав тела", "body_comp_menu")]])
@@ -969,9 +1003,21 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
             return
 
         if step == "bc_import_pick":
-            await q.edit_message_text(
+            await update.message.reply_text(
                 "⚠️ Нажми кнопку спортсмена из списка выше.",
                 reply_markup=self.kb([[(f"⚖️ Состав тела", "body_comp_menu")]])
+            )
+            return
+
+        if step == "bc_import_review":
+            # Раскладка группового файла ждёт подтверждения: текст не отменяет её
+            # и ничего не пишет — только напоминаем про кнопку.
+            await update.message.reply_text(
+                "⚠️ Раскладка ждёт подтверждения.\n"
+                "Нажми «✅ Подтвердить запись» или «❌ Отмена» в сообщении выше.",
+                reply_markup=self.kb([
+                    [("✅ Подтвердить запись", "bc_import_confirm")],
+                    [("❌ Отмена", "bc_import_cancel")]])
             )
             return
 
@@ -1406,6 +1452,10 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                 await self.bc_my_trends(update, ctx)
             elif d.startswith("bc_import_to_"):
                 await self._bc_import_to_athlete(update, ctx)
+            elif d == "bc_import_confirm":
+                await self.bc_import_confirm(update, ctx)
+            elif d == "bc_import_cancel":
+                await self.bc_import_cancel(update, ctx)
             elif d == "body_comp_history":
                 await self.body_comp_history(update, ctx)
             elif d == "reset_account":

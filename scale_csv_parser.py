@@ -218,10 +218,14 @@ def parse_scale_csv(content: str, filename: str = "") -> list:
         # Определяем оригинальный заголовок колонки мышц (до нормализации)
         # чтобы понять единицы: "Мышцы(%)" vs "Мышцы(кг)" vs просто "Мышцы"
         muscle_raw_header = ""
+        bone_raw_header = ""
         for idx, key in col_map.items():
-            if key == "muscle_mass_kg" and idx < len(reader.fieldnames):
+            if idx >= len(reader.fieldnames):
+                continue
+            if key == "muscle_mass_kg" and not muscle_raw_header:
                 muscle_raw_header = reader.fieldnames[idx].lower()
-                break
+            if key == "bone_mass_kg" and not bone_raw_header:
+                bone_raw_header = reader.fieldnames[idx].lower()
 
         for row in reader:
             rec = {}
@@ -252,6 +256,20 @@ def parse_scale_csv(content: str, filename: str = "") -> list:
                 v = _parse_num(rec.get(key))
                 if v is not None:
                     out[key] = int(round(v))
+
+            # Кости: в одном экспорте колонка подписана «Кости» и значение идёт
+            # «3.2кг», в другом — «Кости(%)». Разница в 100 раз, а на экране
+            # всегда стояло «кг». Записываем единицу СТРОКИ так, как её отдало
+            # приложение весов, — не угадываем.
+            if "bone_mass_kg" in out:
+                raw_bone = str(rec.get("bone_mass_kg") or "").lower()
+                if "%" in raw_bone or "%" in bone_raw_header:
+                    out["bone_unit"] = "%"
+                elif "кг" in raw_bone or "kg" in raw_bone or "кг" in bone_raw_header \
+                        or "kg" in bone_raw_header:
+                    out["bone_unit"] = "кг"
+                else:
+                    out["bone_unit"] = None
 
             # Мышцы в экспорте MovingLife (GARLYN Bodyscan Master) — ВСЕГДА процент:
             # колонка «Мышцы(%)», и приложение показывает «Мышечная масса (%)»
