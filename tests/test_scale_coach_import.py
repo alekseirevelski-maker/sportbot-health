@@ -315,3 +315,26 @@ def test_slot_number_and_lookup_rules():
     assert scale_profile_lookup(mapping, "Данные пользователя 9") is None
     ambiguous = {"Профиль 5": 55, "Слот 5": 66}
     assert scale_profile_lookup(ambiguous, "Данные пользователя 5") is None
+
+
+def test_archive_lands_next_to_the_database_not_the_repo_data_dir(tmp_path, monkeypatch):
+    """Архив привязан к БД, а не к config.DB_PATH.
+
+    Иначе тесты (и любой второй экземпляр бота) пишут в боевой каталог: на
+    сервере pytest из deploy.sh оставил три подставных CSV в data/scale_inbox.
+    """
+    monkeypatch.setattr(bot_module, "ADMIN_TELEGRAM_IDS", {DOCTOR_ID})
+    home = tmp_path / "botdata"
+    db = Database(db_path=str(home / "sport_health.db"))
+    db.register_athlete(700403, "c1", "Третья Тестовая", "U17", TEAM_A)
+    a = db.get_athlete_by_telegram_id(700403)["id"]
+    obj = _bot(db)
+    upd, _ = _doc_update(COACH_ID)
+
+    asyncio.run(obj._import_scale_csv(upd, None, _records(), "data20261118120000.csv",
+                                     content=b'"date","x"\n"11/18/2026 12:00:00","7"\n'))
+
+    inbox = home / "scale_inbox"
+    assert inbox.is_dir(), f"архив не рядом с БД: {list(home.iterdir())}"
+    assert list(inbox.rglob("*.csv")), "исходник не заархивирован"
+    db.close()

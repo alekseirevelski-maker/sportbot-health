@@ -513,7 +513,8 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
         """
         user_id = update.effective_user.id
         full_access = self._is_full_access(user_id)
-        archive_upload(content or b"", fname, date.today(), base_dir=inbox_dir)
+        archive_upload(content or b"", fname, date.today(),
+                       base_dir=inbox_dir or self._scale_inbox_dir())
 
         if not full_access and not self._is_admin_or_coach(user_id):
             # спортсмен прислал свой файл — сохраняем на него (только одна точка замеров у него)

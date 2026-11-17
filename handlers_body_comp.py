@@ -1151,6 +1151,17 @@ class BodyCompMixin:
                                       reply_markup=self.kb([[(f"🏠 Главное меню", "main_menu")]]))
 
 
+    def _scale_inbox_dir(self) -> str:
+        """Каталог архива исходников — рядом с ТОЙ БД, к которой обращён этот
+        экземпляр, а не с config.DB_PATH.
+
+        Иначе тесты (в том числе pytest внутри deploy.sh на сервере) пишут
+        подставные CSV в боевой каталог данных — так и случилось 17.11.
+        """
+        from pathlib import Path
+        from scale_archive import INBOX_SUBDIR
+        return str(Path(self.db.db_path).parent / INBOX_SUBDIR)
+
     async def bc_import_confirm(self, update, ctx):
         """Тренер подтвердил раскладку группового CSV — пишем только своих."""
         q = update.callback_query
