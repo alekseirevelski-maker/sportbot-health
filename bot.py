@@ -34,6 +34,7 @@ from cycle_medicine import (
 )
 from watch_parser import parse_watch
 from scale_csv_parser import parse_scale_csv_dated
+from scale_archive import archive_upload
 
 from validator import (
     sanitize_text, validate_heart_rate, validate_age_ge14, parse_birth_date,
@@ -471,7 +472,8 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                 r.get("weight_kg") is not None or r.get("body_fat_pct") is not None
                 for r in scale_records
             ):
-                await self._import_scale_csv(update, ctx, scale_records, fname)
+                await self._import_scale_csv(update, ctx, scale_records, fname,
+                                             content=bytes(content))
                 return
 
             # === Умные часы: обычный путь ===
@@ -502,10 +504,16 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
             logger.error(f"Watch file error: {e}")
             await update.message.reply_text("❌ Ошибка при обработке файла.")
 
-    async def _import_scale_csv(self, update, ctx, records, fname):
-        """Импорт CSV данных биоимпедансных весов (врач/тренер — группа, спортсмен — свой)."""
+    async def _import_scale_csv(self, update, ctx, records, fname,
+                                content=None, inbox_dir=None):
+        """Импорт CSV данных биоимпедансных весов (врач/тренер — группа, спортсмен — свой).
+
+        Исходник кладётся в архив ДО разбора по ролям: потом можно переимпортировать
+        после правки парсера и доказать, что именно прилетело.
+        """
         user_id = update.effective_user.id
         full_access = self._is_full_access(user_id)
+        archive_upload(content or b"", fname, date.today(), base_dir=inbox_dir)
 
         if not full_access:
             # спортсмен прислал свой файл — сохраняем на него (только одна точка замеров у него)
@@ -513,10 +521,21 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
             if not athlete:
                 await update.message.reply_text("❌ Сначала зарегистрируйся: /start")
                 return
+            from scale_csv_parser import distinct_device_profiles
+            # Групповой экспорт (несколько профилей в файле) — это НЕ «мой» файл:
+            # строки других людей залились бы на спортсмена. Молча пишем только
+            # когда профиль один или его нет.
+            profiles = distinct_device_profiles(records)
+            if len(profiles) > 1:
+                await update.message.reply_text(
+                    "⚖️ В этом файле несколько профилей весов (" + ", ".join(profiles[:5]) + ").\n\n"
+                    "Это замеры разных людей, на тебя их записывать нельзя.\n"
+                    "Отправь файл тренеру или врачу — они разложат его по профилям."
+                )
+                return
             saved = 0
             for r in records:
                 data = dict(r)
-                data["recorded_by"] = user_id
                 # рост из анкеты
                 try:
                     qd = self.db.get_questionnaire(athlete["id"])
@@ -525,7 +544,8 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                 except Exception:
                     pass
                 if self.db.save_body_composition(athlete["id"], r.get("record_date"), data,
-                                                 source="csv", device_profile=r.get("device_profile")):
+                                                 source="csv", recorded_by=user_id,
+                                                 device_profile=r.get("device_profile")):
                     saved += 1
             if saved:
                 # Показываем полный анализ + уведомления

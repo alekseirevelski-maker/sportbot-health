@@ -414,9 +414,11 @@ class BodyCompMixin:
             data = dict(r)
             if height_cache.get(athlete_id):
                 data.setdefault("height_cm", height_cache[athlete_id])
-            data["recorded_by"] = user_id
+            # recorded_by — отдельный аргумент сохранения; раньше его клали только в
+            # data-словарь, из-за чего автор замера в проде не записан НИ РАЗУ.
             ok = self.db.save_body_composition(athlete_id, r.get("record_date"), data,
-                                               source="csv", device_profile=prof)
+                                               source="csv", recorded_by=user_id,
+                                               device_profile=prof)
             if ok:
                 saved += 1
                 rows.append(f"👤 {athlete_id}: {self._scale_summary_line(r)}")
@@ -1011,7 +1013,6 @@ class BodyCompMixin:
         saved = 0
         for r in records:
             data = dict(r)
-            data["recorded_by"] = q.from_user.id
             try:
                 qd = self.db.get_questionnaire(athlete_id)
                 if qd and qd.get("height"):
@@ -1019,7 +1020,8 @@ class BodyCompMixin:
             except Exception:
                 pass
             if self.db.save_body_composition(athlete_id, r.get("record_date"), data,
-                                             source="csv", device_profile=r.get("device_profile")):
+                                             source="csv", recorded_by=q.from_user.id,
+                                             device_profile=r.get("device_profile")):
                 saved += 1
         if saved:
             await q.edit_message_text(f"✅ Сохранено *{saved}* записей для {athlete['full_name']}")

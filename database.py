@@ -301,6 +301,7 @@ class Database:
                 visceral_fat_index REAL,
                 subcutaneous_fat_pct REAL,
                 lean_mass_kg REAL,
+                skeletal_muscle_pct REAL,
                 protein_pct REAL,
                 bmr_kcal INTEGER,
                 amr_kcal INTEGER,
@@ -310,6 +311,12 @@ class Database:
                 UNIQUE(athlete_id, record_date)
             )""")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_bc_athlete_date ON body_composition(athlete_id, record_date)")
+            # Миграция: скелетная мышечная масса (в файле весов подписана «Cкелетные
+            # мыщцы(%)») — раньше не маппилась и некуда было ложиться.
+            try:
+                self.conn.execute("ALTER TABLE body_composition ADD COLUMN skeletal_muscle_pct REAL")
+            except Exception:
+                pass  # колонка уже есть
             # Сопоставление профилей весов → спортсмен (для CSV на 16 профилей MovingLife)
             self.conn.execute("""CREATE TABLE IF NOT EXISTS scale_profiles (
                 profile_name TEXT PRIMARY KEY,
@@ -1538,7 +1545,8 @@ class Database:
                 cols = ["athlete_id", "record_date", "source", "recorded_by", "device_profile",
                         "height_cm", "weight_kg", "bmi", "body_fat_pct", "muscle_mass_kg",
                         "body_water_pct", "bone_mass_kg", "visceral_fat_index",
-                        "subcutaneous_fat_pct", "lean_mass_kg", "protein_pct",
+                        "subcutaneous_fat_pct", "lean_mass_kg", "skeletal_muscle_pct",
+                        "protein_pct",
                         "bmr_kcal", "amr_kcal", "notes"]
                 vals = [
                     athlete_id, record_date, source, recorded_by, device_profile,
@@ -1547,6 +1555,7 @@ class Database:
                     _num(data.get("muscle_mass_kg")), _num(data.get("body_water_pct")),
                     _num(data.get("bone_mass_kg")), _num(data.get("visceral_fat_index")),
                     _num(data.get("subcutaneous_fat_pct")), _num(data.get("lean_mass_kg")),
+                    _num(data.get("skeletal_muscle_pct")),
                     _num(data.get("protein_pct")), _int(data.get("bmr_kcal")),
                     _int(data.get("amr_kcal")), data.get("notes"),
                 ]
@@ -1554,7 +1563,7 @@ class Database:
                 updates = ", ".join(f"{c}=excluded.{c}" for c in
                                     ("source", "recorded_by", "device_profile", "height_cm", "weight_kg", "bmi",
                                      "body_fat_pct", "muscle_mass_kg", "body_water_pct", "bone_mass_kg",
-                                     "visceral_fat_index", "subcutaneous_fat_pct", "lean_mass_kg",
+                                     "visceral_fat_index", "subcutaneous_fat_pct", "lean_mass_kg", "skeletal_muscle_pct",
                                      "protein_pct", "bmr_kcal", "amr_kcal", "notes"))
                 self.conn.execute(
                     f"""INSERT INTO body_composition ({', '.join(cols)})

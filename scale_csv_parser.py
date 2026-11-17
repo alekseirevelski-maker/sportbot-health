@@ -32,8 +32,15 @@ HEADER_MAP = [
     # --- состав тела (порядок важен: более специфичные ПЕРЕД общими) ---
     (("body fat", "fat %", "fat percent", "% fat", "жира", "жировой", "жир", "масса жира"), "body_fat_pct"),
     (("weight", "вес"), "weight_kg"),
-    (("bmi", "имп"), "bmi"),
-    (("lean", "безжир", "fat free", "ffm", "безжирн"), "lean_mass_kg"),
+    # «ИМТ» в реальном экспорте подписан кириллицей, а шаблон был «имп» —
+    # из-за этого ИМТ не маппился НИ РАЗУ (на проде bmi NULL в 54/54 записей).
+    (("bmi", "имп", "имт"), "bmi"),
+    # Безжировая масса у MovingLife — «Безж. мас. Тела»; после нормализации это
+    # «безжмасатела», куда шаблон «безжир» не входит → терялась тоже всегда.
+    (("lean", "безжир", "fat free", "ffm", "безжирн", "безж", "fatfree"), "lean_mass_kg"),
+    # Скелетная мышечная масса: в файле весов опечатка «мыщцы» (буква «щ»),
+    # шаблон мышц её не ловил, метрика молча выбрасывалась.
+    (("skeletal", "скелетн", "мыщц"), "skeletal_muscle_pct"),
     (("muscle", "мыш", "мышечной"), "muscle_mass_kg"),
     (("water", "вода", "воды"), "body_water_pct"),
     (("bone", "кост", "костной"), "bone_mass_kg"),
@@ -235,7 +242,7 @@ def parse_scale_csv(content: str, filename: str = "") -> list:
 
             for key in ("weight_kg", "bmi", "body_fat_pct", "muscle_mass_kg", "body_water_pct",
                         "bone_mass_kg", "visceral_fat_index", "subcutaneous_fat_pct",
-                        "lean_mass_kg", "protein_pct", "height_cm"):
+                        "lean_mass_kg", "protein_pct", "height_cm", "skeletal_muscle_pct"):
                 v = rec.get(key)
                 if v is not None:
                     nv = _parse_num(v)
@@ -269,6 +276,21 @@ def parse_scale_csv(content: str, filename: str = "") -> list:
     except Exception as e:
         logger.error(f"parse_scale_csv: {e}")
     return records
+
+
+def distinct_device_profiles(records: list) -> list:
+    """Неповторимые имена профилей весов в разобранном файле (пустые не считаются).
+
+    Нужен, чтобы отличить «личный» экспорт (один профиль или его нет) от
+    «группового» (несколько профилей). Групповой файл нельзя молча записывать на
+    одного спортсмена — это чужие замеры в его истории.
+    """
+    out = []
+    for r in records:
+        p = (r.get("device_profile") or "").strip()
+        if p and p not in out:
+            out.append(p)
+    return out
 
 
 def parse_scale_csv_dated(content: str, filename: str = "") -> list:
