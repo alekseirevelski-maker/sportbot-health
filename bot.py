@@ -1033,24 +1033,7 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
 
         # День цикла (ручное исправление числа: 1..длина+30)
         if step == "survey_cycle":
-            athlete = state.get("data", {}).get("athlete")
-            if not athlete:
-                await update.message.reply_text(
-                    "❌ *Опрос прерван* (возможно бот перезагружался).\n\nХотите начать заново?",
-                    reply_markup=self.kb([[(f"🔄 Пройти опрос", "do_survey")],
-                                          [(f"🏠 Главное меню", "main_menu")]]),
-                    parse_mode="Markdown"
-                )
-                return
-            from cycle_engine import parse_day_input
-            from cycle_ui import values_for_day
-            cl = athlete.get("cycle_length_default") or 28
-            cd = parse_day_input(text, cl)
-            if cd is None:
-                await update.message.reply_text(f"❌ Введи число от 1 до {cl + 30}:")
-                return
-            state["data"].update(values_for_day(cd, cl))
-            await self._ask_complaints(update, ctx)
+            await self._manual_cycle_day(update, ctx, state, text)
             return
 
         # Дата якоря / ретро-коррекции (ДД.ММ)

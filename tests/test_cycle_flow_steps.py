@@ -154,3 +154,52 @@ def test_anchor_date_text_outside_survey_clears_step(tmp_path):
     assert db.get_last_period_start(a["id"]) == target
     assert bot.complaints_called == 0
     assert state["step"] is None                 # залипший шаг блокировал бы текст
+
+
+# ---------- ✏️ Исправить день: правка должна переживать следующий опрос ----------
+
+class _FakeMsg:
+    def __init__(self, text):
+        self.text = text
+        self.replies = []
+
+    async def reply_text(self, text, **kw):
+        self.replies.append(text)
+
+
+def _text_update(text):
+    return SimpleNamespace(callback_query=None,
+                           effective_user=SimpleNamespace(id=555),
+                           message=_FakeMsg(text))
+
+
+def test_manual_cycle_day_moves_anchor_so_next_survey_keeps_it(tmp_path):
+    """Ручной день — это утверждение о дате начала. Раньше правилась только
+    цифра текущего опроса, и назавтра счёт снова шёл от старого якоря
+    (у #106: 16.11 вручную 40 → 17.11 автоматически 42)."""
+    db, a = _girl(tmp_path)
+    db.add_cycle_event(a["id"], date.today() - timedelta(days=41), type="anchor")
+    state = {"step": "survey_cycle", "data": {"athlete": a}}
+    bot = _Bot(db, state)
+    asyncio.run(bot._manual_cycle_day(_text_update("5"), None, state, "5"))
+    assert state["data"]["cycle_day"] == 5
+    assert db.get_last_period_start(a["id"]) == date.today() - timedelta(days=4)
+    assert bot.complaints_called == 1
+
+    # следующий опрос: «Нет» считает от исправленного якоря, а не от старого (42)
+    fresh = db.get_athlete_by_telegram_id(555)
+    nxt = {"step": "survey_cycle_daily", "data": {"athlete": fresh}}
+    asyncio.run(_Bot(db, nxt).set_cycle_daily(_update(_FakeQ("cyc_no")), None))
+    assert nxt["data"]["cycle_day"] == 5
+
+
+def test_manual_cycle_day_rejects_out_of_range_and_keeps_anchor(tmp_path):
+    db, a = _girl(tmp_path)
+    anchor = date.today() - timedelta(days=10)
+    db.add_cycle_event(a["id"], anchor, type="anchor")
+    state = {"step": "survey_cycle", "data": {"athlete": a}}
+    bot = _Bot(db, state)
+    asyncio.run(bot._manual_cycle_day(_text_update("0"), None, state, "0"))
+    assert state["step"] == "survey_cycle"
+    assert bot.complaints_called == 0
+    assert db.get_last_period_start(a["id"]) == anchor

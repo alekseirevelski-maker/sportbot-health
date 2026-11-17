@@ -1205,6 +1205,48 @@ class AthleteMixin:
                 "🗓 Когда на самом деле начались? Введи дату ДД.ММ — "
                 "можно задним числом, счёт пересчитается.", parse_mode="Markdown")
 
+    async def _manual_cycle_day(self, update, ctx, state, text):
+        """Ручной день цикла («✏️ Исправить день») — это утверждение о дате начала.
+
+        Раньше правилась только цифра текущего опроса, а якорь оставался прежним:
+        со следующего опроса счёт снова шёл от него (у #106 16.11 вручную 40 →
+        17.11 автоматически 42, правка «испарялась»). Теперь якорь сдвигается на
+        today-(day-1), поэтому день сохраняется и завтра.
+        """
+        athlete = state.get("data", {}).get("athlete")
+        if not athlete:
+            await update.message.reply_text(
+                "❌ *Опрос прерван* (возможно бот перезагружался).\n\nХотите начать заново?",
+                reply_markup=self.kb([[(f"🔄 Пройти опрос", "do_survey")],
+                                      [(f"🏠 Главное меню", "main_menu")]]),
+                parse_mode="Markdown"
+            )
+            return
+        from cycle_engine import parse_day_input
+        from cycle_ui import apply_anchor, values_for_day
+        today = date.today()
+        cl = athlete.get("cycle_length_default") or 28
+        cd = parse_day_input(text, cl)
+        if cd is None:
+            await update.message.reply_text(f"❌ Введи число от 1 до {cl + 30}:")
+            return
+        target = today - timedelta(days=cd - 1)
+        res = apply_anchor(self.db, athlete["id"], target, today, cl,
+                           source="manual_day")
+        if res:
+            state["data"].update({k: res[k] for k in
+                                  ("cycle_day", "cycle_length", "cycle_phase")})
+            if res.get("learned"):
+                athlete["cycle_length_default"] = res["learned"]
+                athlete["cycle_length_learned"] = 1
+        else:
+            # пересчитать якорь не вышло — день не теряем, но честно предупреждаем
+            state["data"].update(values_for_day(cd, cl))
+            await update.message.reply_text(
+                "⚠️ День записан, но дату начала пересчитать не удалось. "
+                "Если знаешь её — нажми «🗓 Отметить начало».")
+        await self._ask_complaints(update, ctx)
+
 
     async def _ask_cycle_length(self, update, ctx):
         """Спросить длину цикла при первом заполнении."""
