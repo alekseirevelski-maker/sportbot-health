@@ -557,6 +557,7 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
             saved = 0
             for r in records:
                 data = dict(r)
+                from handlers_body_comp import finalize_scale_metrics
                 # рост из анкеты
                 try:
                     qd = self.db.get_questionnaire(athlete["id"])
@@ -564,6 +565,7 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                         data.setdefault("height_cm", qd.get("height"))
                 except Exception:
                     pass
+                data = finalize_scale_metrics(data)
                 if self.db.save_body_composition(athlete["id"], r.get("record_date"), data,
                                                  source="csv", recorded_by=user_id,
                                                  device_profile=r.get("device_profile")):

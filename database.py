@@ -303,6 +303,7 @@ class Database:
                 lean_mass_kg REAL,
                 skeletal_muscle_pct REAL,
                 bone_unit TEXT,
+                bmi_source TEXT,
                 protein_pct REAL,
                 bmr_kcal INTEGER,
                 amr_kcal INTEGER,
@@ -322,6 +323,11 @@ class Database:
             # на экране больше не угадываем.
             try:
                 self.conn.execute("ALTER TABLE body_composition ADD COLUMN bone_unit TEXT")
+            except Exception:
+                pass  # колонка уже есть
+            # Миграция: откуда ИМТ — из файла весов или досчитан нами.
+            try:
+                self.conn.execute("ALTER TABLE body_composition ADD COLUMN bmi_source TEXT")
             except Exception:
                 pass  # колонка уже есть
             # Сопоставление профилей весов → спортсмен (для CSV на 16 профилей MovingLife)
@@ -1563,7 +1569,7 @@ class Database:
                         "height_cm", "weight_kg", "bmi", "body_fat_pct", "muscle_mass_kg",
                         "body_water_pct", "bone_mass_kg", "visceral_fat_index",
                         "subcutaneous_fat_pct", "lean_mass_kg", "skeletal_muscle_pct",
-                        "bone_unit", "protein_pct",
+                        "bone_unit", "bmi_source", "protein_pct",
                         "bmr_kcal", "amr_kcal", "notes"]
                 vals = [
                     athlete_id, record_date, source, recorded_by, device_profile,
@@ -1573,6 +1579,7 @@ class Database:
                     _num(data.get("bone_mass_kg")), _num(data.get("visceral_fat_index")),
                     _num(data.get("subcutaneous_fat_pct")), _num(data.get("lean_mass_kg")),
                     _num(data.get("skeletal_muscle_pct")), data.get("bone_unit"),
+                    data.get("bmi_source"),
                     _num(data.get("protein_pct")), _int(data.get("bmr_kcal")),
                     _int(data.get("amr_kcal")), data.get("notes"),
                 ]
@@ -1581,7 +1588,8 @@ class Database:
                                     ("source", "recorded_by", "device_profile", "height_cm", "weight_kg", "bmi",
                                      "body_fat_pct", "muscle_mass_kg", "body_water_pct", "bone_mass_kg",
                                      "visceral_fat_index", "subcutaneous_fat_pct", "lean_mass_kg", "skeletal_muscle_pct",
-                                     "bone_unit", "protein_pct", "bmr_kcal", "amr_kcal", "notes"))
+                                     "bone_unit", "bmi_source", "protein_pct",
+                                     "bmr_kcal", "amr_kcal", "notes"))
                 self.conn.execute(
                     f"""INSERT INTO body_composition ({', '.join(cols)})
                         VALUES ({placeholders})

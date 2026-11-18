@@ -78,6 +78,8 @@ def format_bc_metrics(row: dict) -> list:
         except (TypeError, ValueError):
             continue
         unit = _bc_unit_for(key, row)
+        if key == "bmi" and (row.get("bmi_source") or "") == "computed":
+            unit = "расчёт"        # ИМТ досчитан из веса и роста, весами не измерен
         if key == "bone_mass_kg" and unit == "не подтверждена":
             lines.append(f"• {label}: *{num:.1f}* (единица не подтверждена)")
         else:
@@ -121,6 +123,26 @@ def scale_profile_lookup(mapping: dict, prof: str):
         return None
     hits = {v for k, v in mapping.items() if slot_number(k) == num}
     return hits.pop() if len(hits) == 1 else None
+
+
+def finalize_scale_metrics(data: dict) -> dict:
+    """Досчитать ИМТ, если файл весов его не отдал, и пометить источник.
+
+    bmi_source: 'file' — значение пришло из файла весов; 'computed' — посчитали из
+    веса и роста этой же строки. Без роста ИМТ не выдумываем.
+    """
+    if data.get("bmi") is not None:
+        data.setdefault("bmi_source", "file")
+        return data
+    try:
+        w = float(data.get("weight_kg"))
+        h = float(data.get("height_cm"))
+    except (TypeError, ValueError):
+        return data
+    if 20 <= w <= 250 and 100 <= h <= 230:
+        data["bmi"] = round(w / ((h / 100.0) ** 2), 1)
+        data["bmi_source"] = "computed"
+    return data
 
 
 class BodyCompMixin:
@@ -542,6 +564,7 @@ class BodyCompMixin:
                             f"{self._scale_athlete_label(athlete_id)}: "
                             f"{self._scale_summary_line(r).strip()}")
                 continue
+            data = finalize_scale_metrics(data)
             # recorded_by — отдельный аргумент сохранения; раньше его клали только в
             # data-словарь, из-за чего автор замера в проде не записан НИ РАЗУ.
             ok = self.db.save_body_composition(athlete_id, r.get("record_date"), data,
@@ -1142,6 +1165,7 @@ class BodyCompMixin:
                     data.setdefault("height_cm", qd.get("height"))
             except Exception:
                 pass
+            data = finalize_scale_metrics(data)
             if self.db.save_body_composition(athlete["id"], r.get("record_date"), data,
                                              source="csv", recorded_by=user_id,
                                              device_profile=r.get("device_profile")):
@@ -1209,6 +1233,7 @@ class BodyCompMixin:
                     data.setdefault("height_cm", qd.get("height"))
             except Exception:
                 pass
+            data = finalize_scale_metrics(data)
             if self.db.save_body_composition(athlete_id, r.get("record_date"), data,
                                              source="csv", recorded_by=q.from_user.id,
                                              device_profile=r.get("device_profile")):
