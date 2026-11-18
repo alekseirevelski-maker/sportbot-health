@@ -1654,6 +1654,36 @@ class Database:
                 logger.error(f"get_bc_trend: {e}")
                 return out
 
+    def get_bc_latest_all(self, team: str = None) -> List[Dict]:
+        """Последний замер каждого спортсмена — БЕЗ фильтра по давности.
+
+        Нужен для Excel-отчёта «по запросу»: регулярного графика взвешиваний нет,
+        и режим «за сутки» отдавал пустой файл именно тогда, когда в него заходят.
+        Тренерские профили (telegram_id есть в coach_teams) исключаются, как и в
+        get_bc_period.
+        """
+        with self._lock:
+            try:
+                sql = """
+                    SELECT bc.*, a.full_name, a.team, a.age_group, a.id as athlete_id
+                    FROM body_composition bc
+                    JOIN athletes a ON a.id = bc.athlete_id
+                    JOIN (SELECT athlete_id, MAX(record_date) AS mr FROM body_composition
+                          GROUP BY athlete_id) last ON last.athlete_id = bc.athlete_id
+                         AND last.mr = bc.record_date
+                    WHERE NOT EXISTS (SELECT 1 FROM coach_teams ct
+                                      WHERE ct.telegram_id = a.telegram_id)
+                """
+                params: list = []
+                if team:
+                    sql += " AND a.team = ?"
+                    params.append(team)
+                sql += " ORDER BY a.team, a.full_name"
+                return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+            except Exception as e:
+                logger.error(f"get_bc_latest_all: {e}")
+                return []
+
     def get_bc_period(self, days: int = 90, team: str = None) -> List[Dict]:
         """Получить данные состава тела за период (для Excel-отчёта)."""
         with self._lock:

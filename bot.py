@@ -1567,7 +1567,7 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                 state = self.get_state(q.from_user.id)
                 state["data"]["bc_report_team"] = team
                 buttons = [
-                    [("📅 Последний замер", "report_bc_period_1")],
+                    [("📌 Последний замер каждого", "report_bc_period_0")],
                     [("📅 2 недели", "report_bc_period_14")],
                     [("📅 Месяц", "report_bc_period_30")],
                     [("📅 3 месяца", "report_bc_period_90")],

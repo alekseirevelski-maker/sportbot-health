@@ -21,6 +21,17 @@ if TYPE_CHECKING:
     from bot import SportHealthBot
 
 
+def bc_report_rows(db, days: int, team=None) -> list:
+    """Строки для Excel-отчёта по весам.
+
+    days == 0 — особый режим «последний замер каждого» (без фильтра по давности):
+    график взвешиваний нерегулярный, поэтому «за сутки» чаще всего пусто.
+    """
+    if days == 0:
+        return db.get_bc_latest_all(team=team)
+    return db.get_bc_period(days, team)
+
+
 class ReportsMixin:
     """Миксин для reports."""
 
@@ -529,7 +540,7 @@ class ReportsMixin:
             return c
 
         # ---- Получаем данные ----
-        rows = self.db.get_bc_period(days, team_filter)
+        rows = bc_report_rows(self.db, days, team_filter)
         if team_filter is None:
             _active = set(ACTIVE_TEAMS)
             rows = [r for r in rows if r.get("team") in _active]
