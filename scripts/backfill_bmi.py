@@ -52,6 +52,12 @@ def plan(db_path, apply_changes=False, verbose=True):
                JOIN (SELECT athlete_id, MAX(id) mid FROM questionnaires GROUP BY athlete_id) t
                  ON t.mid = q.id""").fetchall()}
 
+        # Строки, где ИМТ уже есть, но источник не записан: до v5 расчёта в коде
+        # не было, значит значение пришло из файла весов.
+        legacy = con.execute(
+            "SELECT COUNT(*) FROM body_composition "
+            "WHERE bmi IS NOT NULL AND bmi_source IS NULL").fetchone()[0]
+
         changes = []
         for r in rows:
             h, source = r["height_cm"], "computed"
@@ -64,7 +70,9 @@ def plan(db_path, apply_changes=False, verbose=True):
             changes.append((value, source, r["id"]))
 
         if verbose:
-            print("строк без ИМТ с весом: %d, посчитаем: %d" % (len(rows), len(changes)))
+            print("строк без ИМТ с весом: %d, посчитаем: %d; "
+                  "строк с ИМТ без источника: %d (пометим как file)"
+                  % (len(rows), len(changes), legacy))
             for value, source, rid in changes[:15]:
                 print("  id=%-5s bmi=%-5s источник=%s" % (rid, value, source))
             if len(changes) > 15:
@@ -78,8 +86,14 @@ def plan(db_path, apply_changes=False, verbose=True):
                 [(v, s, rid) for v, s, rid in changes])
             con.commit()
             if verbose:
-                print("применено:", len(changes))
-        return {"rows": len(changes), "values": [c[0] for c in changes]}
+                print("применено расчётов:", len(changes))
+        if apply_changes and legacy:
+            con.execute("UPDATE body_composition SET bmi_source = 'file' "
+                        "WHERE bmi IS NOT NULL AND bmi_source IS NULL")
+            con.commit()
+            if verbose:
+                print("помечено ИМТ из файла:", legacy)
+        return {"rows": len(changes), "values": [c[0] for c in changes], "legacy": legacy}
     finally:
         con.close()
 

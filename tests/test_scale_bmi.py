@@ -172,3 +172,33 @@ def test_card_marks_computed_bmi(tmp_path):
                                               "bmi_source": "file"}))
     assert "ИМТ" in computed and "расчёт" in computed, computed
     assert "ИМТ" in from_file and "расчёт" not in from_file, from_file
+
+
+def test_backfill_marks_existing_bmi_with_provenance(tmp_path):
+    """Старые строки с ИМТ из файла: источник у них не записан (бэкфилл до v5).
+
+    ИМТ в них мог быть только из файла — расчёта в коде до v5 не существовало,
+    поэтому бэкфилл проставляет 'file', а не оставляет NULL.
+    """
+    import importlib.util
+
+    db, aid = _db(tmp_path)
+    db.save_body_composition(aid, "2026-11-18", {"weight_kg": 70.0, "height_cm": 175,
+                                                 "bmi": 22.9}, source="csv")
+    db.close()
+    path = str(tmp_path / "bmi.db")
+
+    spec = importlib.util.spec_from_file_location("backfill_bmi2", "scripts/backfill_bmi.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    plan = mod.plan(path, apply_changes=False, verbose=False)
+    assert plan["legacy"] == 1, plan
+    con = Database(db_path=path)
+    assert con.get_body_composition(aid, days=999)[0]["bmi_source"] is None, "dry-run записал"
+    con.close()
+
+    mod.plan(path, apply_changes=True, verbose=False)
+    con = Database(db_path=path)
+    assert con.get_body_composition(aid, days=999)[0]["bmi_source"] == "file"
+    con.close()
