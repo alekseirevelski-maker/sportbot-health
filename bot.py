@@ -523,17 +523,37 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                 await update.message.reply_text("❌ Сначала зарегистрируйся: /start")
                 return
             from scale_csv_parser import distinct_device_profiles
-            # Групповой экспорт (несколько профилей в файле) — это НЕ «мой» файл:
-            # строки других людей залились бы на спортсмена. Молча пишем только
-            # когда профиль один или его нет.
+            # Выгрузку присылает сам спортсмен. Если в файле несколько слотов
+            # весов, его строки нельзя угадать: спрашиваем «какой слот твой»
+            # (один раз, запоминаем) и пишем только строки этого слота. Чужие
+            # цифры при этом не показываем.
             profiles = distinct_device_profiles(records)
-            if len(profiles) > 1:
+            mine = self.db.get_scale_slot(athlete["id"])
+            if len(profiles) > 1 and (not mine or mine not in profiles):
+                state = self.get_state(user_id)
+                state["step"] = "bc_slot_pick"
+                state["data"]["bc_slot_profiles"] = profiles
+                state["data"]["bc_slot_records"] = records
+                try:
+                    await self.persist_user_state(user_id)
+                except Exception:
+                    pass
+                buttons = [[(prof, f"bc_slot_{i}")] for i, prof in enumerate(profiles[:10])]
+                buttons.append([("🔙 Назад", "body_comp_menu")])
                 await update.message.reply_text(
-                    "⚖️ В этом файле несколько профилей весов (" + ", ".join(profiles[:5]) + ").\n\n"
-                    "Это замеры разных людей, на тебя их записывать нельзя.\n"
-                    "Отправь файл тренеру или врачу — они разложат его по профилям."
-                )
+                    "⚖️ В твоём файле несколько профилей весов — это замеры разных "
+                    "людей, угадать твой я не могу.\n\n"
+                    "Нажми свой профиль (цифры других я не показываю и не записываю). "
+                    "Если не знаешь номер — вспомни, под каким ты взвешивался в "
+                    "приложении весов, или спроси у тренера.",
+                    reply_markup=self.kb(buttons))
                 return
+            if len(profiles) == 1 and not mine:
+                self.db.set_scale_slot(athlete["id"], profiles[0], user_id)
+                mine = profiles[0]
+            if mine and mine in profiles and len(profiles) >= 1:
+                records = [r for r in records
+                           if (r.get("device_profile") or "") == mine]
             saved = 0
             for r in records:
                 data = dict(r)
@@ -548,6 +568,9 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                                                  source="csv", recorded_by=user_id,
                                                  device_profile=r.get("device_profile")):
                     saved += 1
+            st = self.get_state(user_id)
+            if st.get("step") in ("wait_scale_csv", "bc_slot_pick"):
+                self.clear_state(user_id)
             if saved:
                 # Показываем полный анализ + уведомления
                 await self._analyze_and_notify_scale(update, athlete, records)
@@ -1010,6 +1033,14 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
             )
             return
 
+        if step == "bc_slot_pick":
+            await update.message.reply_text(
+                "⚖️ Нажми кнопку со своим профилем весов из сообщения выше — "
+                "так я запишу замеры только на тебя.",
+                reply_markup=self.kb([[(f"🔙 Назад", "body_comp_menu")]])
+            )
+            return
+
         if step == "bc_import_review":
             # Раскладка группового файла ждёт подтверждения: текст не отменяет её
             # и ничего не пишет — только напоминаем про кнопку.
@@ -1453,6 +1484,8 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                 await self.bc_my_trends(update, ctx)
             elif d.startswith("bc_import_to_"):
                 await self._bc_import_to_athlete(update, ctx)
+            elif d.startswith("bc_slot_"):
+                await self.bc_slot_choose(update, ctx)
             elif d == "bc_import_confirm":
                 await self.bc_import_confirm(update, ctx)
             elif d == "bc_import_cancel":

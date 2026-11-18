@@ -34,10 +34,12 @@ class AthleteMixin:
                 [(f"👕 Моя команда", "coach_team_view")],
                 [(f"📊 Мой отчёт (Excel)", "report_export_menu")],
             ]
+            if self._is_admin_or_coach(user.id):
+                # Весы видят и тренер (свои команды), и врач (вся база)
+                buttons.insert(0, [(f"⚖️ Весы и состав тела", "bc_menu")])
             if self._is_full_access(user.id):
                 buttons.insert(0, [(f"📋 Отчет для врача", "admin_report")])
                 buttons.insert(1, [(f"⚙️ Управление", "admin_manage")])
-                buttons.insert(2, [(f"⚖️ Весы и состав тела", "bc_menu")])
             # Дашборд «На сегодня» — первая строка меню тренера/врача (роль гейтится)
             if self._is_admin_or_coach(user.id):
                 buttons.insert(0, [(f"🔔 На сегодня", "dash_today")])

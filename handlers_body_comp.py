@@ -4,6 +4,7 @@
 """
 
 import logging
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from telegram import InlineKeyboardButton
 from config import BC_NORMS, BC_RED_FLAGS
@@ -1091,10 +1092,79 @@ class BodyCompMixin:
         )
 
 
+    async def bc_slot_choose(self, update, ctx):
+        """Спортсмен выбрал свой слот весов: запоминаем и дописываем его строки."""
+        q = update.callback_query
+        try:
+            await q.answer()
+        except Exception:
+            pass
+        user_id = q.from_user.id
+        athlete = self.db.get_athlete_by_telegram_id(user_id)
+        state = self.get_state(user_id)
+        profiles = (state.get("data") or {}).get("bc_slot_profiles") or []
+        records = (state.get("data") or {}).get("bc_slot_records") or []
+        raw_idx = str(q.data).rsplit("_", 1)[-1]
+        idx = int(raw_idx) if raw_idx.isdigit() else -1
+
+        if not athlete or not records or idx < 0 or idx >= len(profiles):
+            # после рестарта RAM-state пуст — молчать нельзя
+            self.clear_state(user_id)
+            await q.edit_message_text(
+                "⚖️ Файл уже не в памяти (возможно, бот перезагружался).\n"
+                "Отправь выгрузку с весов заново.",
+                reply_markup=self.kb([[(f"📤 Загрузить данные с весов", "scale_upload_start")],
+                                      [(f"🔙 Назад", "body_comp_menu")]]))
+            return
+
+        prof = profiles[idx]
+        claimed = scale_profile_lookup(self.db.get_scale_profiles(), prof)
+        declared = self.db.get_slot_claims().get(prof)
+        if (claimed is not None and claimed != athlete["id"]) or \
+                (declared is not None and declared != athlete["id"]):
+            await q.edit_message_text(
+                f"⚠️ Профиль «{prof}» уже закреплён за другим спортсменом.\n\n"
+                "Выбери другой свой профиль, а если не уверен — попроси врача "
+                "проверить закрепление профилей весов.",
+                reply_markup=self.kb([[(f"🔙 Назад", "body_comp_menu")]]))
+            return
+
+        self.db.set_scale_slot(athlete["id"], prof, user_id)
+        mine_records = [r for r in records if (r.get("device_profile") or "") == prof]
+        self.clear_state(user_id)
+
+        saved = 0
+        for r in mine_records:
+            data = dict(r)
+            try:
+                qd = self.db.get_questionnaire(athlete["id"])
+                if qd and qd.get("height"):
+                    data.setdefault("height_cm", qd.get("height"))
+            except Exception:
+                pass
+            if self.db.save_body_composition(athlete["id"], r.get("record_date"), data,
+                                             source="csv", recorded_by=user_id,
+                                             device_profile=r.get("device_profile")):
+                saved += 1
+
+        await q.edit_message_text(
+            f"✅ Запомнил: твой профиль — «{prof}».\n"
+            f"Записано замеров: {saved}. В следующий раз спрашивать не буду.",
+            reply_markup=self.kb([[(f"⚖️ Состав тела", "body_comp_menu")]]))
+        if saved:
+            upd = SimpleNamespace(message=q.message, callback_query=None,
+                                  effective_user=SimpleNamespace(id=user_id))
+            await self._analyze_and_notify_scale(upd, athlete, mine_records)
+
+
     async def scale_upload_start(self, update, ctx):
         """Инструкция для спортсмена по загрузке CSV весов."""
         q = update.callback_query
         await q.answer()
+        # «Жду твой файл» без шага было обещанием в нишу: текст вместо файла
+        # обрабатывает ветка wait_scale_csv в handle_text.
+        state = self.get_state(q.from_user.id)
+        state["step"] = "wait_scale_csv"
         await q.edit_message_text(
             "📤 *Загрузка данных с весов*\n\n"
             "Отправь CSV-файл из приложения *MovingLife*: "

@@ -332,6 +332,16 @@ class Database:
                 mapped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (athlete_id) REFERENCES athletes(id)
             )""")
+            # Слот весов, который спортсмен сам назвал своим (один слот = один
+            # спортсмен). Нужен, чтобы личная выгрузка MovingLife с несколькими
+            # профилями разбиралась без тренера: спросили один раз — дальше сами.
+            self.conn.execute("""CREATE TABLE IF NOT EXISTS scale_slots (
+                athlete_id INTEGER PRIMARY KEY,
+                profile_name TEXT NOT NULL,
+                chosen_by INTEGER,
+                chosen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (athlete_id) REFERENCES athletes(id)
+            )""")
             # Персональные цели спортсменов
             self.conn.execute("""CREATE TABLE IF NOT EXISTS athlete_goals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1665,6 +1675,47 @@ class Database:
                         self.conn.execute("SELECT profile_name, athlete_id FROM scale_profiles").fetchall()}
             except Exception as e:
                 logger.error(f"get_scale_profiles: {e}")
+                return {}
+
+    def get_scale_slot(self, athlete_id: int):
+        """Слот весов, который спортсмен назвал своим (None — не выбирал)."""
+        with self._lock:
+            try:
+                row = self.conn.execute(
+                    "SELECT profile_name FROM scale_slots WHERE athlete_id = ?",
+                    (athlete_id,)).fetchone()
+                return row["profile_name"] if row else None
+            except Exception as e:
+                logger.error(f"get_scale_slot: {e}")
+                return None
+
+    def set_scale_slot(self, athlete_id: int, profile_name: str,
+                       chosen_by: int = None) -> bool:
+        """Запомнить слот за спортсменом (перезапись разрешена только им самим)."""
+        with self._lock:
+            try:
+                self.conn.execute(
+                    """INSERT INTO scale_slots (athlete_id, profile_name, chosen_by, chosen_at)
+                       VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                       ON CONFLICT(athlete_id) DO UPDATE SET
+                           profile_name=excluded.profile_name,
+                           chosen_by=excluded.chosen_by,
+                           chosen_at=CURRENT_TIMESTAMP""",
+                    (athlete_id, profile_name, chosen_by))
+                self.conn.commit()
+                return True
+            except Exception as e:
+                logger.error(f"set_scale_slot: {e}")
+                return False
+
+    def get_slot_claims(self):
+        """{profile_name: athlete_id} из самодеклараций спортсменов."""
+        with self._lock:
+            try:
+                return {r["profile_name"]: r["athlete_id"] for r in self.conn.execute(
+                    "SELECT profile_name, athlete_id FROM scale_slots").fetchall()}
+            except Exception as e:
+                logger.error(f"get_slot_claims: {e}")
                 return {}
 
     def set_scale_profile(self, profile_name: str, athlete_id: int, mapped_by: int = None) -> bool:

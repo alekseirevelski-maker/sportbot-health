@@ -82,6 +82,9 @@ _TABLE: list[tuple[str, Optional[str]]] = [
     # весы/состав тела: bc_menu, bc_overview, bc_profiles, bc_page_*, bc_map_*,
     # bc_assign_*, bc_view_* (scope внутри хендлера), bc_team_*
     # (bc_overview_all / bc_import_to_ / bc_my_trends длиннее — матчатся раньше)
+    # выбор спортсменом СВОЕГО слота весов — собственный flow (игрок жмёт кнопку
+    # «какой профиль мой»); префикс длиннее, чем «bc_», поэтому матчится раньше
+    ("bc_slot_", None),
     ("bc_", "coach"),
     # дашборд тренера (Task 4: dash_today и др.)
     ("dash_", "coach"),
