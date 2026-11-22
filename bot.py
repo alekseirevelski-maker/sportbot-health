@@ -1998,6 +1998,40 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
             logger.error(f"Trend alerts error: {e}", exc_info=True)
 
 
+    def _schedule_weekly_jobs(self, app):
+        """Недельный PNG (вс 18:00 ЕКБ) и сводка тренерам (пн 09:00 ЕКБ).
+
+        PTB v20+ run_daily days: 0=воскресенье … 6=суббота
+        (JobQueue._CRON_MAPPING). Старый комментарий «0=Mon, 6=Sun» слал
+        PNG по субботам, а сводку по воскресеньям: неделя 21.11 осталась
+        без отчётов (сб = сбой сервера, вс = job не запускался).
+        """
+        try:
+            import pytz as _pytz
+            from datetime import datetime as _dt_cls
+            from telegram.ext._jobqueue import JobQueue as _JQ
+            tz = _pytz.timezone("Asia/Yekaterinburg")
+            jobs = (
+                ("weekly_report", self._send_weekly_reports, (0,),
+                 _dt_cls(1970, 1, 4, 18, 0),
+                 "Воскресные отчёты настроены на 18:00 по Челябинску"),
+                ("weekly_coach_summary", self._send_weekly_coach_summary, (1,),
+                 _dt_cls(1970, 1, 5, 9, 0),
+                 "Сводка тренеров настроена на понедельник 09:00 по Челябинску"),
+            )
+            for name, cb, days, dt, msg in jobs:
+                try:
+                    for old in self.job_queue.get_jobs_by_name(name):
+                        old.schedule_removal()
+                    app.job_queue.run_daily(
+                        cb, time=tz.localize(dt).timetz(), days=days, name=name)
+                    cron = ",".join(_JQ._CRON_MAPPING[d] for d in days)
+                    logger.info(f"{msg} [cron: {cron}]")
+                except Exception as e:
+                    logger.warning(f"{name} not scheduled: {e}")
+        except Exception as e:
+            logger.warning(f"Weekly jobs not scheduled: {e}")
+
     async def _send_weekly_reports(self, context):
         """Воскресный персональный отчёт-картинка каждому спортсмену."""
         if TESTING:
@@ -2186,38 +2220,9 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
         except Exception as e:
             logger.warning(f"Trend alerts not scheduled: {e}")
 
-        # Воскресный персональный отчёт-картинка (каждое воскресенье 18:00 по ЕКБ)
-        try:
-            import pytz as _pytz
-            from datetime import datetime as _dt_cls
-            sunday_tz = _pytz.timezone("Asia/Yekaterinburg")
-            sunday_target = sunday_tz.localize(_dt_cls(1970, 1, 4, 18, 0))  # воскресенье
-            for old in self.job_queue.get_jobs_by_name("weekly_report"):
-                old.schedule_removal()
-            app.job_queue.run_daily(
-                self._send_weekly_reports,
-                time=sunday_target.timetz(),
-                days=(6,),  # Sunday (0=Mon, 6=Sun)
-                name="weekly_report"
-            )
-            logger.info("Воскресные отчёты настроены на 18:00 по Челябинску")
-        except Exception as e:
-            logger.warning(f"Weekly report not scheduled: {e}")
-
-        # Понедельничная сводка для тренеров (09:00 по ЕКБ)
-        try:
-            monday_target = _pytz.timezone("Asia/Yekaterinburg").localize(_dt_cls(1970, 1, 5, 9, 0))  # понедельник
-            for old in self.job_queue.get_jobs_by_name("weekly_coach_summary"):
-                old.schedule_removal()
-            app.job_queue.run_daily(
-                self._send_weekly_coach_summary,
-                time=monday_target.timetz(),
-                days=(0,),  # Monday (0=Mon)
-                name="weekly_coach_summary"
-            )
-            logger.info("Сводка тренеров настроена на понедельник 09:00 по Челябинску")
-        except Exception as e:
-            logger.warning(f"Coach summary not scheduled: {e}")
+        # Недельный PNG (вс 18:00 ЕКБ) + сводка тренерам (пн 09:00 ЕКБ).
+        # Дни пиннятся регресс-тестом test_weekly_schedule.py (PTB: 0=вс…6=сб).
+        self._schedule_weekly_jobs(app)
 
         logger.info("Бот v3.0 запущен!")
         app.run_polling(drop_pending_updates=True)
