@@ -202,7 +202,8 @@ def generate_weekly_report(full_name: str, age_group: str, team: str,
                            streak: int, rank: str, total: int,
                            stats: dict, trend_7d: list,
                            prev: dict = None, baseline: dict = None,
-                           trends: dict = None, pain: list = None) -> str:
+                           trends: dict = None, pain: list = None,
+                           outage_note: str = None) -> str:
     prev = prev or {}
     baseline = baseline or {}
     bl_median = baseline.get("median") or {}
@@ -292,6 +293,15 @@ def generate_weekly_report(full_name: str, age_group: str, team: str,
 
     # ===== боль и жалобы =====
     _pain_card(draw, pain or [])
+
+    # ===== пометка о сбое сервера (над футером; без эмодзи — PIL их не рисует) =====
+    if outage_note:
+        note = outage_note.replace("⚠️", "").strip()
+        font = F_SMALL
+        bbox = draw.textbbox((0, 0), note, font=font)
+        if bbox[2] - bbox[0] > W - 120:
+            font = _font(False, 20)
+        _center(draw, note, 1552, font, YELLOW)
 
     # ===== футер =====
     draw.line([0, 1585, W, 1585], fill=LINE, width=2)

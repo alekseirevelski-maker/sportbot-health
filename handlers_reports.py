@@ -7,9 +7,10 @@ import asyncio
 import csv
 import io
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING
 from database import ACTIVE_TEAMS
+from outage import outage_note_for_period
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -56,6 +57,13 @@ class ReportsMixin:
         period_names = {1: "сегодня", 7: "7 дней", 14: "2 недели", 30: "месяц", 90: "3 месяца", 999: "всё время"}
         period_label = period_names.get(days, f"{days} дн.")
         period_tag = {1: "1d", 7: "7d", 14: "14d", 30: "30d", 90: "90d", 999: "all"}.get(days, f"{days}d")
+
+        # Дни сбоя сервера в окне отчёта (окно = окну SQL-выборки):
+        # помечаем сводку, листы дней и колонку дня сбоя в матрице команды.
+        _today = date.today()
+        _outage = self.db.get_outage_dates()
+        _outage_iso = {d.isoformat() for d in _outage}
+        outage_note = outage_note_for_period(_outage, _today - timedelta(days=days), _today)
 
         def _hooper(row):
             """Hooper = Сон + Утомление + Крепатура (каждое 1-7, итог 3-21)."""
@@ -176,6 +184,12 @@ class ReportsMixin:
             cell(ws0, r, ci, "-", align=center)
         r += 1
 
+        # Пометка о сбое сервера на листе «Сводка»
+        if outage_note:
+            r += 1
+            ws0.merge_cells(start_row=r, start_column=1, end_row=r, end_column=8)
+            cell(ws0, r, 1, outage_note, font=Font(bold=True, size=10, color="C00000"), border=None)
+
         # эмблема клуба в правом верхнем углу листа «Сводка»
         self._add_logo_to_ws(ws0, anchor="J3", size=90)
 
@@ -198,7 +212,8 @@ class ReportsMixin:
         ws_d.merge_cells(f"A1:{last_flat}1")
         cell(ws_d, 1, 1, "🏀 ЧБК — ОПРОСЫ ПО ДНЯМ", font=title_font, border=None)
         ws_d.merge_cells(f"A2:{last_flat}2")
-        cell(ws_d, 2, 1, f"Период: {period_label} | Дата отчёта: {datetime.now().strftime('%d.%m.%Y %H:%M')} | Опросов: {len(wellness_rows)}", font=subtitle_font, border=None)
+        cell(ws_d, 2, 1, f"Период: {period_label} | Дата отчёта: {datetime.now().strftime('%d.%m.%Y %H:%M')} | Опросов: {len(wellness_rows)}"
+             + (f" | {outage_note}" if outage_note else ""), font=subtitle_font, border=None)
         for _ci, (_h, _w) in enumerate(flat_cols, 1):
             cell(ws_d, 3, _ci, _h, font=hf, fill=hfl, align=hdr_align)
             ws_d.column_dimensions[get_column_letter(_ci)].width = _w
@@ -241,7 +256,8 @@ class ReportsMixin:
             cell(ws, r, 1, f"🏀 ЧБК — Опросы по дням: {t}", font=title_font, border=None)
             r += 1
             ws.merge_cells(f"A{r}:L{r}")
-            cell(ws, r, 1, f"Период: {period_label} | Дата отчёта: {datetime.now().strftime('%d.%m.%Y %H:%M')} | Всего спортсменов: {len(ta)}", font=subtitle_font, border=None)
+            cell(ws, r, 1, f"Период: {period_label} | Дата отчёта: {datetime.now().strftime('%d.%m.%Y %H:%M')} | Всего спортсменов: {len(ta)}"
+                 + (f" | {outage_note}" if outage_note else ""), font=subtitle_font, border=None)
             r += 1
 
             # ===== БЛОК: МАТРИЦА «ИГРОК-СТРОКА, ДЕНЬ-СТОЛБЕЦ, ПОДСТОЛБЦЫ=ПОКАЗАТЕЛИ» =====
@@ -268,7 +284,11 @@ class ReportsMixin:
                 athlete_days.setdefault(name, {})[str(d)] = row
                 if str(d) not in all_dates:
                     all_dates.append(str(d))
-            all_dates.sort()
+            # Дни сбоя сервера в окне отчёта — колонка видна даже без опросов,
+            # чтобы пропуск не выглядел как обычный «серый» день
+            _win_start = _today - timedelta(days=days)
+            all_dates = sorted(set(all_dates) | {
+                d.isoformat() for d in _outage if _win_start <= d <= _today})
 
             # заголовок команды уже есть на r-2 (merge A:L). Дальше легенда + шапка.
             # ЛЕГЕНДА (с цветными ●)
@@ -339,6 +359,8 @@ class ReportsMixin:
                     datelabel = dt[5:] + "\n" + wd
                 except Exception:
                     datelabel = dt[5:]
+                if dt in _outage_iso:
+                    datelabel += "\n⚠️ сбой"
                 # лёгкая зебра: чётные блоки дней — светло-голубой фон у ячейки даты (и её блока)
                 hdr_fill = zebra_hdr_fill if di % 2 == 1 else hfl
                 ws.merge_cells(start_row=SR_DATE, start_column=col, end_row=SR_DATE, end_column=col + len(metrics) - 1)
@@ -488,6 +510,7 @@ class ReportsMixin:
             document=output,
             filename=f"report_{period_tag}_{date.today().strftime('%Y%m%d')}.xlsx",
             caption=f"📊 Excel-отчёт за {period_label} — лист «По дням» + сводка"
+                    + (f"\n{outage_note}" if outage_note else "")
         )
 
     # ==================== МЕНЮ СОСТАВА ТЕЛА (СПОРТСМЕН) ====================

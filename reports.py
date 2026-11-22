@@ -5,6 +5,7 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 
 from database import Database
+from outage import outage_note_for_period
 
 
 class ReportGenerator:
@@ -21,6 +22,11 @@ class ReportGenerator:
         if not surveys:
             return None
 
+        today = date.today()
+        start = today - timedelta(days=days)
+        outage = self.db.get_outage_dates()
+        note = outage_note_for_period(outage, start, today)
+
         # Простой текстовый отчёт (для MVP)
         report_path = Path(__file__).parent / "data" / f"report_{athlete_id}_{date.today()}.txt"
 
@@ -30,7 +36,10 @@ class ReportGenerator:
             f.write(f"Спортсмен: {athlete['full_name']}\n")
             f.write(f"Группа: {athlete['age_group']}\n")
             f.write(f"Период: {days} дней\n")
-            f.write(f"Дата отчёта: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n")
+            f.write(f"Дата отчёта: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n")
+            if note:
+                f.write(f"{note}\n")
+            f.write("\n")
 
             f.write(f"{'='*40}\n")
             f.write(f"СРЕДНИЕ ПОКАЗАТЕЛИ\n")
@@ -63,6 +72,13 @@ class ReportGenerator:
                     f.write(f" | HRV: {s['hrv_ms']} мс")
                 f.write("\n\n")
 
+            # Дни сбоя сервера без опроса: отмечаем, чтобы пропуск не выглядел прогулом
+            survey_dates = {str(s.get('survey_date')) for s in surveys}
+            for d in sorted(outage):
+                if start <= d <= today and d.isoformat() not in survey_dates:
+                    f.write(f"📅 {d.isoformat()} — ⚠️ сбой сервера, опросы не собирались "
+                            f"(серия не прервана)\n\n")
+
             # Рекомендации
             f.write(f"{'='*40}\n")
             f.write(f"АВТОМАТИЧЕСКИЕ РЕКОМЕНДАЦИИ\n")
@@ -87,6 +103,10 @@ class ReportGenerator:
         stats = self.db.get_team_stats(age_group, days)
         athletes = self.db.get_athletes_by_age_group(age_group)
 
+        today = date.today()
+        note = outage_note_for_period(
+            self.db.get_outage_dates(), today - timedelta(days=days), today)
+
         report_path = Path(__file__).parent / "data" / f"team_report_{age_group}_{date.today()}.txt"
 
         with open(report_path, "w", encoding="utf-8") as f:
@@ -94,7 +114,10 @@ class ReportGenerator:
             f.write(f"{'='*40}\n\n")
             f.write(f"Возрастная группа: {age_group}\n")
             f.write(f"Период: {days} дней\n")
-            f.write(f"Дата отчёта: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n")
+            f.write(f"Дата отчёта: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n")
+            if note:
+                f.write(f"{note}\n")
+            f.write("\n")
 
             f.write(f"{'='*40}\n")
             f.write(f"СРЕДНИЕ ПО КОМАНДЕ\n")

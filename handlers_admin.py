@@ -4,12 +4,13 @@
 """
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 from typing import TYPE_CHECKING
 from telegram.error import Forbidden
 from contact_ui import contact_row
 from config import AGE_GROUPS, ADMIN_IDS, REMINDER_HOUR_DEFAULT, REMINDER_MINUTE_DEFAULT
 from database import TEAMS
+from outage import outage_note_for_period
 
 ADMIN_TELEGRAM_IDS = ADMIN_IDS
 REMINDER_HOUR = REMINDER_HOUR_DEFAULT
@@ -828,12 +829,22 @@ class AdminMixin:
         if not teams:
             return ""
         lines = ["📊 *Недельная сводка по командам*\n━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+        # Дни сбоя сервера в неделе: помечаем и вычитаем из ожидаемого числа
+        # опросов, чтобы процент участия не выглядел как прогулы команды.
+        today = date.today()
+        week_start = today - timedelta(days=6)
+        outage = self.db.get_outage_dates()
+        outage_in_week = sorted(d for d in outage if week_start <= d <= today)
+        note = outage_note_for_period(outage, week_start, today)
+        if note:
+            lines.append(note)
+        expected_days = 7 - len(outage_in_week)
         for team in sorted(teams):
             s = self.db.get_team_week_summary(team, 7)
             if not s["athletes"]:
                 lines.append(f"\n👕 *{team}*\n— спортсменов нет")
                 continue
-            total = s["athletes"] * 7
+            total = s["athletes"] * expected_days
             fill = f"{s['surveys']} из {total}"
             if total:
                 fill += f" ({s['surveys'] * 100 // total}%)"

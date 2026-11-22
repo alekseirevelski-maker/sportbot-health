@@ -41,6 +41,7 @@ from validator import (
 )
 from access_control import required_role_for
 from dashboard import build_today_dashboard
+from outage import outage_note_for_period, recent_outage_note
 
 if PROXY_URL:
     os.environ["http_proxy"] = PROXY_URL
@@ -1885,6 +1886,11 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
             if len(not_passed) > 20:
                 summary += f"  • … и ещё {len(not_passed)-20}\n"
 
+            # Сбой сервера в последние 3 дня: пропуск опросов — не вина спортсменов
+            _outage_note = recent_outage_note(self.db.get_outage_dates(), date.today())
+            if _outage_note:
+                summary += "\n" + _outage_note + "\n"
+
             for admin_id in self._full_access_ids():
                 try:
                     await bot.send_message(chat_id=admin_id, text=summary, parse_mode="Markdown")
@@ -1999,6 +2005,9 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
             return
         bot = context.bot
         athletes = self.db.get_all_athletes()
+        # Пометка о сбое сервера за неделю (инцидент 21.11): и на картинке, и в подписи
+        outage_note = outage_note_for_period(
+            self.db.get_outage_dates(), date.today() - timedelta(days=6), date.today())
         sent = 0
         failed = 0
         for a in athletes:
@@ -2035,6 +2044,7 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                     baseline=baseline,
                     trends=trends,
                     pain=pain,
+                    outage_note=outage_note,
                 )
                 with open(path, "rb") as f:
                     await bot.send_photo(
@@ -2044,7 +2054,8 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                             f"📊 *Твой недельный отчёт*, {self._first_name(a)}!\n"
                             f"Серия: 🔥 {a.get('survey_streak', 0)} "
                             f"{'день' if a.get('survey_streak', 0) == 1 else ('дня' if a.get('survey_streak', 0) % 10 in (2, 3, 4) and a.get('survey_streak', 0) % 100 not in (12, 13, 14) else 'дней')}\n\n"
-                            f"Увидимся в понедельник! 💪"
+                            + (f"{outage_note}\n\n" if outage_note else "")
+                            + "Увидимся в понедельник! 💪"
                         ),
                         parse_mode="Markdown"
                     )

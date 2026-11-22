@@ -1,5 +1,6 @@
 """Модуль работы с базой данных спортсменов v2.2."""
 
+import json
 import sqlite3
 import logging
 import threading
@@ -27,6 +28,25 @@ TEAMS = [
 # Активные команды — только они показываются в интерфейсе врача/отчётах/весах.
 # Спортсмены прочих команд остаются в БД (история цела), но скрыты.
 ACTIVE_TEAMS = ("ЧБК-Челябинская область", "Славянка ЧКПЗ-2")
+
+
+def compute_streak(survey_dates, anchor, outage_dates=frozenset()) -> int:
+    """Серия = число реальных опросов подряд от якоря назад.
+
+    День сбоя сервера без опроса перешагивается: не обрывает серию и не
+    прибавляется к ней (решение владельца 22.11.2026, инцидент 21.11).
+    Реальный опрос в день сбоя считается обычным днём. Обычный пропуск
+    (не сбой) по-прежнему обрывает цепочку.
+    """
+    surveys = set(survey_dates)
+    outages = set(outage_dates)
+    streak = 0
+    d = anchor
+    while d in surveys or d in outages:
+        if d in surveys:
+            streak += 1
+        d -= timedelta(days=1)
+    return streak
 
 
 def _is_real_name(name):
@@ -433,6 +453,68 @@ class Database:
                 logger.error(f"Set setting error: {e}")
                 return False
 
+    def get_outage_dates(self) -> set:
+        """Дни сбоя сервера (bot_settings.outage_dates, JSON-список ISO-дат).
+
+        Битое значение → пустое множество + лог: save_survey не должен
+        падать из-за реестра, а пропуски не должны «лечиться» молча.
+        """
+        raw = self.get_setting("outage_dates", "")
+        if not raw:
+            return set()
+        try:
+            items = json.loads(raw)
+            if not isinstance(items, list):
+                raise ValueError(f"ожидался список, получено {type(items).__name__}")
+            return {date.fromisoformat(s) for s in items if isinstance(s, str)}
+        except (ValueError, TypeError) as e:
+            logger.error(f"outage_dates: битое значение {raw!r}: {e}")
+            return set()
+
+    def set_outage_dates(self, dates) -> bool:
+        items = sorted({d.isoformat() for d in dates})
+        return self.set_setting("outage_dates", json.dumps(items))
+
+    def recalc_streaks(self, dry_run: bool = True, outage_dates=None) -> List[Dict]:
+        """Пересчёт survey_streak всех атлетов с учётом дней сбоя.
+
+        Якорь — последняя дата опроса атлета (серия «на момент последнего
+        ответа», как в реконструкции 11.11), а не сегодня: у не ответивших
+        сегодня серия не обнуляется. Меняет ТОЛЬКО survey_streak;
+        total_surveys/last_active не трогает. Идемпотентен.
+        outage_dates=None — взять реестр из bot_settings; явный набор —
+        считать с ним, не записывая реестр (dry-run скрипта с --outage).
+        Возвращает список изменений {id, full_name, old, new}.
+        """
+        with self._lock:
+            outage = self.get_outage_dates() if outage_dates is None else set(outage_dates)
+            changes = []
+            athletes = self.conn.execute(
+                "SELECT id, full_name, survey_streak FROM athletes").fetchall()
+            for a in athletes:
+                rows = self.conn.execute(
+                    "SELECT DISTINCT survey_date FROM daily_wellness WHERE athlete_id = ?",
+                    (a["id"],)).fetchall()
+                dates = []
+                for r in rows:
+                    d = r["survey_date"]
+                    if isinstance(d, str):
+                        d = date.fromisoformat(d)
+                    dates.append(d)
+                if not dates:
+                    continue
+                new = compute_streak(dates, max(dates), outage)
+                if new != a["survey_streak"]:
+                    changes.append({"id": a["id"], "full_name": a["full_name"],
+                                    "old": a["survey_streak"], "new": new})
+                    if not dry_run:
+                        self.conn.execute(
+                            "UPDATE athletes SET survey_streak = ? WHERE id = ?",
+                            (new, a["id"]))
+            if not dry_run:
+                self.conn.commit()
+            return changes
+
     def update_athlete_gender(self, athlete_id: int, gender: str,
                               cycle_length: int = None) -> bool:
         with self._lock:
@@ -794,6 +876,7 @@ class Database:
 
             # Обновляем streak. ВАЖНО: без LIMIT — серия должна расти
             # дальше 60 дней (баг от 2026-10: LIMIT 60 навечно запирал streak=60).
+            # Дни сбоя сервера (outage_dates) перешагиваются — инцидент 21.11.2026.
             last_surveys = self.conn.execute(
                 """SELECT DISTINCT survey_date FROM daily_wellness
                    WHERE athlete_id = ?
@@ -807,14 +890,7 @@ class Database:
                     d = date.fromisoformat(d)
                 dates.append(d)
 
-            streak = 0
-            check_date = today
-            for d in dates:
-                if d == check_date:
-                    streak += 1
-                    check_date -= timedelta(days=1)
-                elif d < check_date:
-                    break
+            streak = compute_streak(dates, today, self.get_outage_dates())
 
             self.conn.execute(
                 """UPDATE athletes SET
@@ -1211,6 +1287,23 @@ class Database:
                 FROM daily_wellness WHERE athlete_id = ?
                 ORDER BY survey_date DESC LIMIT ?
             """, (athlete_id, limit)).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_athlete_surveys(self, athlete_id: int, days: int = 7) -> List[Dict]:
+        """Опросы спортсмена за окно [today - days .. today] для текстового отчёта.
+
+        Окно совпадает с SQL-выборкой других отчётов (date('now', '-N days')).
+        """
+        with self._lock:
+            rows = self.conn.execute("""
+                SELECT survey_date, sleep_score, stress_score, fatigue_score,
+                       muscle_soreness, mood_score, resting_hr, hrv_ms,
+                       auto_recommendation
+                FROM daily_wellness
+                WHERE athlete_id = ?
+                  AND survey_date >= date('now', '-' || ? || ' days')
+                ORDER BY survey_date DESC
+            """, (athlete_id, days)).fetchall()
             return [dict(r) for r in rows]
 
     def save_questionnaire(self, athlete_id, data):

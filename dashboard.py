@@ -27,6 +27,7 @@ from typing import Dict, List, Optional, Tuple
 
 from config import ALERT_THRESHOLDS
 from cycle_ui import cycle_alert_lines
+from outage import recent_outage_note
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +214,11 @@ def build_today_dashboard(db, user_id: int, scoped_athletes: List[Dict],
     n_done = len(scoped_athletes) - len(not_passed)
     text = (f"🔔 *На сегодня* — {today.strftime('%d.%m.%Y')}\n"
             f"{_SEPARATOR}\n\n")
+
+    # Сбой сервера в последние 3 дня: пропуск опросов — не вина спортсменов
+    outage_note = recent_outage_note(db.get_outage_dates(), today)
+    if outage_note:
+        text += outage_note + "\n\n"
 
     if not red_rows and not yellow_rows:
         text += (f"🟢 Тревог нет, {n_done} из {len(scoped_athletes)} "
