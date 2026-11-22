@@ -150,6 +150,45 @@ def test_weekly_png_renders_outage_note(tmp_path, monkeypatch):
     assert img.size == (900, 1640)
 
 
+def test_weekly_png_note_does_not_overlap_pain_block(tmp_path, monkeypatch):
+    """Пометка на y=1552 не должна накладываться на 3-ю строку блока боли (y=1545).
+
+    При пометке блок «Боль и жалобы» сжимается до 2 строк (последняя на y=1513).
+    Без пометки прежняя раскладка (3 строки, «и ещё» на y=1545) сохраняется.
+    """
+    import weekly_report
+    from outage import outage_note_for_period
+    calls = []
+    orig_center = weekly_report._center
+
+    def spy(draw, text, y, font, fill):
+        calls.append((text, y))
+        return orig_center(draw, text, y, font, fill)
+
+    monkeypatch.setattr(weekly_report, "_center", spy)
+    monkeypatch.setattr(weekly_report, "__file__", str(tmp_path / "weekly_report.py"))
+    pain = [{"survey_date": (TODAY - timedelta(days=i)).isoformat(),
+             "pain_nrs": 4, "pain_location": "колено"} for i in range(1, 5)]
+    note = outage_note_for_period({OUTAGE}, TODAY - timedelta(days=6), TODAY)
+
+    weekly_report.generate_weekly_report(
+        full_name="Тестовый Спортсмен", age_group="U17", team="ЧБК",
+        streak=31, rank="Мониторинг-машина", total=40,
+        stats={"avg_readiness": 7.0, "avg_sleep": 6.0},
+        trend_7d=[6, 5, 6, 5, 6, 5, 6], pain=pain, outage_note=note)
+    assert any("и ещё" in t and y == 1513 for t, y in calls), calls
+    assert not any(y == 1545 for _t, y in calls), "3-я строка боли не рисуется при пометке"
+    assert any(y == 1552 for _t, y in calls), "пометка на месте"
+
+    calls.clear()
+    weekly_report.generate_weekly_report(
+        full_name="Тестовый Спортсмен", age_group="U17", team="ЧБК",
+        streak=31, rank="Мониторинг-машина", total=40,
+        stats={"avg_readiness": 7.0, "avg_sleep": 6.0},
+        trend_7d=[6, 5, 6, 5, 6, 5, 6], pain=pain)
+    assert any("и ещё" in t and y == 1545 for t, y in calls), "без пометки раскладка прежняя"
+
+
 # ==================== текстовый отчёт по атлету ====================
 
 def test_athlete_text_report_marks_outage(tmp_path, monkeypatch):

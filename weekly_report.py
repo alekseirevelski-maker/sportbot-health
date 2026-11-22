@@ -168,14 +168,21 @@ def _avg_row(draw, y, label, val, invert, norm_val, prev_val):
     draw.text((W - 210, y), val_s, fill=col, font=F_BODY)
 
 
-def _pain_card(draw, pain):
-    """Блок «Боль и жалобы» (компактно, максимум 3 строки)."""
+def _pain_card(draw, pain, compact=False):
+    """Блок «Боль и жалобы» (компактно, максимум 3 строки).
+
+    compact=True (есть пометка о сбое на y=1552): максимум 2 строки,
+    чтобы последняя строка (y=1513) не накладывалась на пометку.
+    """
     _card(draw, 1420, 125)
     _center(draw, "БОЛЬ И ЖАЛОБЫ", 1443, F_CARD_TITLE, ACCENT)
     if not pain:
         _center(draw, "За неделю жалоб не было — отлично!", 1487, F_BODY, GREEN)
         return
-    detail = pain[:2] if len(pain) > 3 else pain[:3]
+    if compact:
+        detail = pain[:1] if len(pain) > 2 else pain[:2]
+    else:
+        detail = pain[:2] if len(pain) > 3 else pain[:3]
     for i, p in enumerate(detail):
         d = str(p.get("survey_date", ""))[5:]
         parts = []
@@ -192,10 +199,10 @@ def _pain_card(draw, pain):
         line = f"{d}: " + ", ".join(parts)
         col = RED if (p.get("analgesics") or nrs >= 5) else YELLOW
         _center(draw, line, 1481 + i * 32, F_SMALL, col)
-    if len(pain) > 3:
-        rest = len(pain) - 3
+    rest = len(pain) - len(detail)
+    if rest > 0:
         _center(draw, f"…и ещё {rest} {_plural(rest, 'день', 'дня', 'дней')} с жалобами",
-                1481 + 2 * 32, F_SMALL, GRAY)
+                1481 + len(detail) * 32, F_SMALL, GRAY)
 
 
 def generate_weekly_report(full_name: str, age_group: str, team: str,
@@ -292,7 +299,7 @@ def generate_weekly_report(full_name: str, age_group: str, team: str,
         y += 52
 
     # ===== боль и жалобы =====
-    _pain_card(draw, pain or [])
+    _pain_card(draw, pain or [], compact=bool(outage_note))
 
     # ===== пометка о сбое сервера (над футером; без эмодзи — PIL их не рисует) =====
     if outage_note:
