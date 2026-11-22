@@ -2018,12 +2018,14 @@ class SportHealthBot(SurveyMixin, QuestionnaireMixin, BodyCompMixin, ReportsMixi
                 stats = self.db.get_athlete_stats(a["id"], 7)
                 if not stats.get("total_days"):
                     continue
-                trend = [v for _, v in self.db.get_trend_data(a["id"], "sleep", 7)]
+                # Пары (survey_date, value): бары сна и тренды привязаны к датам,
+                # пропущенный день рисуется «—» в своём слоте (weekly_report v3)
+                trend = self.db.get_trend_data(a["id"], "sleep", 7)
                 prev = self.db.get_athlete_stats_window(a["id"], 7, 7)
                 baseline = self.db.get_individual_baseline(a["id"], 30)
                 trends = {
-                    "readiness": [v for _, v in self.db.get_trend_data(a["id"], "readiness", 7)],
-                    "hr": [v for _, v in self.db.get_trend_data(a["id"], "hr", 7)],
+                    "readiness": self.db.get_trend_data(a["id"], "readiness", 7),
+                    "hr": self.db.get_trend_data(a["id"], "hr", 7),
                 }
                 pain = self.db.get_week_pain_summary(a["id"], 7)
                 from weekly_report import generate_weekly_report

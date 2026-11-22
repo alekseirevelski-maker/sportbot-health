@@ -1,58 +1,87 @@
-"""Воскресный персональный отчёт-картинка для спортсмена ЧБК (v2.2).
+"""Воскресный персональный отчёт-картинка для спортсмена ЧБК (v3).
 
 v2: информативность — стрелки «неделя к неделе», личная норма (30-дн медиана)
 пунктиром и текстом, мини-графики готовности/пульса, блок «Боль и жалобы»,
 правильное склонение «1 день / 2 дня / 5 дней».
-v2.2: исправлены наложения блоков (готовность/сон), семантика стрелок
-(▲▼ = направление данных, цвет = хорошо/плохо по шкале), «Энергия» вместо
-«Утомление», плейсхолдеры «—» при отсутствии данных.
+v2.2: семантика стрелок (▲▼ = направление данных, цвет = хорошо/плохо по шкале),
+«Энергия» вместо «Утомление», плейсхолдеры «—» при отсутствии данных.
+v3: светлая «медицинская» тема (одобрена владельцем 22.11.2026):
+настоящая эмблема ЧБК из опросника (assets/logo_cbk.png) вместо рисованного
+кружка, бандл-шрифт Inter (assets/fonts, OFL) — прод и локалка рендерят
+одинаково, холст 1080x2060 (крупнее шрифт = читабельнее после JPEG-сжатия
+Telegram), кольцо готовности, бары сна по ДАТАМ (пропуск дня = «—» в своём
+слоте), норма-чипы инлайн, авто-fit длинного имени, ранг-пилюля.
 
-Дизайн: тёмный «спортивный» фон, брендовый оранжевый ЧБК, карточки.
+Данные: trend_7d и trends — списки пар (survey_date, value) из get_trend_data;
+legacy-список голых значений тоже поддерживается (позиционно). Средние —
+семантика get_athlete_stats (окно >= date('now','-7 days')), подпись «за неделю».
 Без эмодзи (PIL их не рисует) — только текст и графика.
 """
 import os
-from datetime import date
+from datetime import date, timedelta
 from PIL import Image, ImageDraw, ImageFont
 
-# ---- размер и палитра ----
-W, H = 900, 1640
-BG = (16, 24, 40)           # тёмно-синий фон
-HEADER = (20, 36, 60)       # шапка
-CARD = (28, 42, 68)         # карточка
-ACCENT = (255, 110, 40)     # оранжевый ЧБК (#FF6600)
-ACCENT_DARK = (200, 80, 20)
-GREEN = (80, 210, 120)
-YELLOW = (255, 200, 60)
-RED = (255, 90, 90)
-WHITE = (255, 255, 255)
-GRAY = (150, 165, 190)
-LINE = (50, 70, 105)
+# ---- размер и палитра (светлая тема) ----
+W, H = 1080, 2060
+BG = (247, 248, 250)        # фон страницы
+HEADER = (255, 255, 255)    # шапка
+CARD = (255, 255, 255)      # карточка
+ACCENT = (255, 110, 40)     # оранжевый ЧБК
+GREEN = (25, 150, 85)
+YELLOW = (190, 130, 0)
+RED = (215, 60, 60)
+TEXT = (22, 32, 46)         # основной текст
+GRAY = (105, 115, 132)      # вторичный текст
+LINE = (226, 230, 238)      # контур карточек / разделители
+TRACK = (233, 236, 242)     # фон баров / кольцо-трек
+CHIP = (240, 242, 247)      # норма-чип
+DASH = (150, 160, 178)      # пунктир нормы
+GUIDE = (233, 236, 242)     # направляющие трендов
+PILL = (255, 237, 229)      # подложка ранг-пилюли
 
-# ---- шрифты: DejaVu (кириллица). На Windows для локального теста — arial. ----
-def _font(bold, size):
-    candidates = []
-    if bold:
-        candidates = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-                      "C:/Windows/Fonts/arialbd.ttf", "arialbd.ttf"]
-    else:
-        candidates = ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                      "C:/Windows/Fonts/arial.ttf", "arial.ttf"]
-    for c in candidates:
-        try:
-            return ImageFont.truetype(c, size)
-        except Exception:
-            continue
-    return ImageFont.load_default()
+# ---- ассеты: вычисляются при импорте от реального пути модуля ----
+# (тесты патчат __file__ позже — шрифты/логотип должны браться из репо)
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+LOGO_PATH = os.path.join(ASSETS_DIR, "logo_cbk.png")
 
-F_TITLE = _font(True, 46)
-F_SUB = _font(False, 26)
-F_NAME = _font(True, 58)
-F_META = _font(False, 28)
-F_CARD_TITLE = _font(True, 34)
-F_BIG = _font(True, 64)
-F_BODY = _font(False, 30)
-F_SMALL = _font(False, 24)
-F_FOOTER = _font(False, 26)
+# ---- шрифты: бандл Inter (OFL, кириллица + ▲▼). Без тихого fallback. ----
+_FONT_CACHE = {}
+
+
+def _font(weight, size):
+    key = (weight, size)
+    if key not in _FONT_CACHE:
+        path = os.path.join(ASSETS_DIR, "fonts", f"Inter-{weight}.ttf")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"bundled font missing: {path}")
+        _FONT_CACHE[key] = ImageFont.truetype(path, size)
+    return _FONT_CACHE[key]
+
+
+F_TITLE = _font("Bold", 52)        # СПОРТМЕД
+F_SUB = _font("Regular", 28)       # подзаголовок шапки
+F_NAME = _font("Bold", 60)         # имя (авто-fit вниз до 40)
+F_META = _font("Regular", 30)      # возраст · команда · опросы
+F_CARD_TITLE = _font("Medium", 30)  # заголовки карточек
+F_BIG = _font("Bold", 60)          # число готовности в кольце
+F_BODY = _font("Regular", 30)      # дельта-фраза готовности
+F_SMALL = _font("Regular", 24)     # пометка о сбое, «/ 10»
+F_FOOTER = _font("Regular", 24)    # футер
+
+F_LABEL = _font("Medium", 24)      # СЕРИЯ ОПРОСОВ / ГОТОВНОСТЬ / БОЛЬ И ЖАЛОБЫ
+F_STREAK = _font("Bold", 54)       # значение серии
+F_RANK = _font("Medium", 28)       # ранг-пилюля
+F_ROW = _font("Medium", 28)        # названия показателей в средних
+F_CHIP = _font("Regular", 22)      # норма-чип
+F_ARROW = _font("Regular", 26)     # стрелка дельты в средних
+F_VAL = _font("Bold", 32)          # значение в средних
+F_PAIN = _font("Regular", 26)      # строки жалоб
+F_DAY = _font("Regular", 22)       # дни недели / значения баров / «—»
+F_NORM = _font("Regular", 26)      # «норма X.X» у сна, «средняя за неделю»
+F_HINT = _font("Regular", 22)      # «шкала 0–10, выше — лучше»
+F_NOTE_SMALL = _font("Regular", 20)  # длинная пометка о сбое
+F_GOOD = _font("Regular", 28)      # «жалоб не было — отлично!»
+F_TREND = _font("Regular", 24)     # подписи и последние значения трендов
 
 
 def _plural(n, one, few, many):
@@ -71,14 +100,8 @@ def _center(draw, text, y, font, fill):
     draw.text(((W - tw) // 2, y), text, fill=fill, font=font)
 
 
-def _right(draw, text, x_right, y, font, fill):
-    bbox = draw.textbbox((0, 0), text, font=font)
-    tw = bbox[2] - bbox[0]
-    draw.text((x_right - tw, y), text, fill=fill, font=font)
-
-
 def _card(draw, y0, h):
-    draw.rounded_rectangle([55, y0, W - 55, y0 + h], radius=24, fill=CARD,
+    draw.rounded_rectangle([60, y0, W - 60, y0 + h], radius=28, fill=CARD,
                            outline=LINE, width=2)
 
 
@@ -89,14 +112,6 @@ def _score_color(v, invert=False):
     if invert:
         return GREEN if v <= 60 else (YELLOW if v <= 70 else RED)
     return GREEN if v >= 6 else (YELLOW if v >= 4 else RED)
-
-
-def _bar(draw, x0, y, x1, frac, color):
-    """Прогресс-бар с закруглением."""
-    draw.rounded_rectangle([x0, y, x1, y + 22], radius=11, fill=(45, 60, 90))
-    w = int((x1 - x0) * max(0.0, min(1.0, frac)))
-    if w > 4:
-        draw.rounded_rectangle([x0, y, x0 + w, y + 22], radius=11, fill=color)
 
 
 def _dashed_line(draw, x0, y, x1, color, dash=14, gap=9, width=3):
@@ -120,64 +135,86 @@ def _delta_text(cur, prev_val, invert=False):
     return f"{arrow} {d:+.1f}", GREEN if good else RED
 
 
-def _sparkline(draw, values, x0, y0, x1, y1, color=ACCENT, norm=None):
-    clean = [v for v in values if v is not None]
+def _delta_sentence(cur, prev_val, invert=False):
+    """Дельта готовности словами: «▲ +0.6 к прошлой неделе»."""
+    if cur is None or prev_val is None:
+        return "нет данных за прошлую неделю", GRAY
+    d = cur - prev_val
+    if abs(d) < 0.15:
+        return "без изменений к прошлой неделе", GRAY
+    arrow = "▲" if d > 0 else "▼"
+    good = (d > 0) if not invert else (d < 0)
+    return f"{arrow} {d:+.1f} к прошлой неделе", GREEN if good else RED
+
+
+def _dated_values(items, window):
+    """Пары (survey_date, value) → 7 слотов окна today-6..today по ДАТАМ.
+
+    Пропущенный день = None в своём слоте (рисуется «—»). Legacy-список
+    голых значений (без дат) раскладывается позиционно — обратная совместимость.
+    """
+    items = list(items or [])
+    if items and isinstance(items[0], (tuple, list)) and len(items[0]) == 2:
+        by_date = {str(d): v for d, v in items}
+        return [by_date.get(iso) for iso in window]
+    return (items + [None] * 7)[:7]
+
+
+def _sparkline(draw, vals, x0, x1, y0, y1, color):
+    """Мини-график по 7 слотам дат: пропуски не соединяются линией."""
+    clean = [v for v in vals if v is not None]
     if not clean:
         return
     mn, mx = min(clean), max(clean)
     rng = (mx - mn) or 1
     pts = []
-    for i, v in enumerate(values[-7:]):
+    for i, v in enumerate(vals):
         if v is None:
             continue
-        t = (i + 0.5) / 7.0
-        px = x0 + (x1 - x0) * t
-        normv = (v - mn) / rng
-        py = y1 - (y1 - y0) * normv
+        px = x0 + (x1 - x0) * (i + 0.5) / 7.0
+        py = y1 - (y1 - y0) * (v - mn) / rng
         pts.append((px, py))
-    # направляющие
-    for gx in range(x0, x1 + 1, (x1 - x0) // 6):
-        draw.line([(gx, y0), (gx, y1)], fill=(40, 55, 85), width=2)
-    # личная норма — пунктир
-    if norm is not None:
-        ny = y1 - (y1 - y0) * ((norm - mn) / rng)
-        ny = max(y0, min(y1, ny))
-        _dashed_line(draw, x0, ny, x1, (120, 140, 175))
+    for i in range(7):
+        gx = x0 + (x1 - x0) * (i + 0.5) / 7.0
+        draw.line([(gx, y0), (gx, y1)], fill=GUIDE, width=2)
     if len(pts) >= 2:
-        draw.line(pts, fill=color, width=6)
+        draw.line(pts, fill=color, width=5)
     for px, py in pts:
-        draw.ellipse([px - 7, py - 7, px + 7, py + 7], fill=WHITE,
+        draw.ellipse([px - 6, py - 6, px + 6, py + 6], fill=CARD,
                      outline=color, width=4)
 
 
 def _avg_row(draw, y, label, val, invert, norm_val, prev_val):
-    """Строка средних: label | норма (под) | стрелка | точка | значение."""
-    col = _score_color(val, invert)
-    val_s = f"{val:.1f}" if isinstance(val, (int, float)) else "—"
-    draw.text((110, y), label, fill=WHITE, font=F_BODY)
-    if norm_val is not None:
-        norm_s = (f"норма ~{int(round(norm_val))}" if invert
-                  else f"норма {norm_val:.1f}")
-        draw.text((110, y + 34), norm_s, fill=GRAY, font=F_SMALL)
-    else:
-        draw.text((110, y + 34), "—", fill=GRAY, font=F_SMALL)
+    """Строка средних: label | норма-чип инлайн | стрелка | точка | значение."""
+    draw.text((100, y), label, fill=TEXT, font=F_ROW)
+    lb = draw.textbbox((0, 0), label, font=F_ROW)
+    lw = lb[2] - lb[0]
+    ns = (f"норма ~{int(round(norm_val))}" if invert
+          else f"норма {norm_val:.1f}") if norm_val is not None else "норма —"
+    nb = draw.textbbox((0, 0), ns, font=F_CHIP)
+    nw = nb[2] - nb[0]
+    cx0 = 100 + lw + 16
+    draw.rounded_rectangle([cx0, y - 2, cx0 + nw + 32, y + 34], radius=17, fill=CHIP)
+    draw.text((cx0 + 16, y + 4), ns, fill=GRAY, font=F_CHIP)
     arrow_s, arrow_c = _delta_text(val, prev_val, invert)
-    if arrow_s:
-        draw.text((W - 370, y), arrow_s, fill=arrow_c, font=F_BODY)
-    draw.ellipse([W - 260, y + 14, W - 240, y + 34], fill=col)
-    draw.text((W - 210, y), val_s, fill=col, font=F_BODY)
+    draw.text((W - 320, y + 6), arrow_s, fill=arrow_c, font=F_ARROW, anchor="rm")
+    col = _score_color(val, invert)
+    draw.ellipse([W - 260, y + 8, W - 240, y + 28], fill=col)
+    val_s = f"{val:.1f}" if isinstance(val, (int, float)) else "—"
+    draw.text((W - 100, y + 2), val_s, fill=col, font=F_VAL, anchor="rm")
 
 
 def _pain_card(draw, pain, compact=False):
-    """Блок «Боль и жалобы» (компактно, максимум 3 строки).
+    """Блок «Боль и жалобы».
 
-    compact=True (есть пометка о сбое на y=1552): максимум 2 строки,
-    чтобы последняя строка (y=1513) не накладывалась на пометку.
+    compact=True (есть пометка о сбое на y=1934): карточка 150px и максимум
+    1 строка жалобы + «и ещё» (y=1858), чтобы не накладываться на пометку.
+    Без пометки: карточка 190px, 2 строки + «и ещё» (y=1894).
     """
-    _card(draw, 1420, 125)
-    _center(draw, "БОЛЬ И ЖАЛОБЫ", 1443, F_CARD_TITLE, ACCENT)
+    _card(draw, 1760, 150 if compact else 190)
+    draw.text((100, 1784), "БОЛЬ И ЖАЛОБЫ", fill=ACCENT, font=F_LABEL)
     if not pain:
-        _center(draw, "За неделю жалоб не было — отлично!", 1487, F_BODY, GREEN)
+        draw.text((100, 1826), "За неделю жалоб не было — отлично!", fill=GREEN, font=F_GOOD)
         return
     if compact:
         detail = pain[:1] if len(pain) > 2 else pain[:2]
@@ -198,11 +235,12 @@ def _pain_card(draw, pain, compact=False):
             parts.append("обезболивающие")
         line = f"{d}: " + ", ".join(parts)
         col = RED if (p.get("analgesics") or nrs >= 5) else YELLOW
-        _center(draw, line, 1481 + i * 32, F_SMALL, col)
+        draw.text((100, 1822 + i * 36), line, fill=col, font=F_PAIN)
     rest = len(pain) - len(detail)
     if rest > 0:
-        _center(draw, f"…и ещё {rest} {_plural(rest, 'день', 'дня', 'дней')} с жалобами",
-                1481 + len(detail) * 32, F_SMALL, GRAY)
+        draw.text((100, 1822 + len(detail) * 36),
+                  f"…и ещё {rest} {_plural(rest, 'день', 'дня', 'дней')} с жалобами",
+                  fill=GRAY, font=F_PAIN)
 
 
 def generate_weekly_report(full_name: str, age_group: str, team: str,
@@ -217,68 +255,115 @@ def generate_weekly_report(full_name: str, age_group: str, team: str,
     median_hr = baseline.get("median_hr")
     trends = trends or {}
 
+    today = date.today()
+    d0 = today - timedelta(days=6)
+    window = [(d0 + timedelta(days=i)).isoformat() for i in range(7)]
+
     img = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(img)
 
-    # ===== шапка =====
-    draw.rectangle([0, 0, W, 190], fill=HEADER)
-    draw.line([0, 190, W, 190], fill=ACCENT, width=6)
-    cx, cy, r = 90, 95, 42
-    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=ACCENT)
-    bbox = draw.textbbox((0, 0), "ЧБК", font=F_TITLE)
-    tw = bbox[2] - bbox[0]
-    draw.text((cx - tw // 2, cy - 26), "ЧБК", fill=WHITE, font=F_TITLE)
-    draw.text((150, 55), "СПОРТМЕД", fill=WHITE, font=F_TITLE)
-    draw.text((152, 120), "Недельный отчёт", fill=GRAY, font=F_SUB)
+    # ===== шапка: настоящая эмблема ЧБК из опросника =====
+    draw.rectangle([0, 0, W, 220], fill=HEADER)
+    draw.line([0, 220, W, 220], fill=ACCENT, width=6)
+    logo = Image.open(LOGO_PATH).convert("RGBA")  # нет файла — FileNotFoundError
+    sm = logo.resize((100, 100), Image.LANCZOS)
+    img.paste(sm, (60, 60), sm)
+    draw.text((190, 64), "СПОРТМЕД", fill=TEXT, font=F_TITLE)
+    draw.text((192, 134), f"Недельный отчёт · {d0:%d.%m}–{today:%d.%m}",
+              fill=GRAY, font=F_SUB)
 
-    # ===== имя =====
-    _center(draw, full_name, 225, F_NAME, WHITE)
-    meta = f"{age_group}  |  {team}  |  {total} {_plural(total, 'опрос', 'опроса', 'опросов')}"
-    _center(draw, meta, 300, F_META, GRAY)
+    # ===== имя (авто-fit: длинные ФИО не вылезают за холст) + мета =====
+    size = 60
+    name_font = _font("Bold", size)
+    while size > 40:
+        bb = draw.textbbox((0, 0), full_name, font=name_font)
+        if bb[2] <= W - 120:
+            break
+        size -= 2
+        name_font = _font("Bold", size)
+    draw.text((60, 256), full_name, fill=TEXT, font=name_font)
+    meta = f"{age_group}  ·  {team}  ·  {total} {_plural(total, 'опрос', 'опроса', 'опросов')}"
+    draw.text((60, 336), meta, fill=GRAY, font=F_META)
 
-    # ===== карточка серии =====
-    _card(draw, 340, 115)
-    _center(draw, "СЕРИЯ", 363, F_CARD_TITLE, ACCENT)
-    _center(draw, f"{streak} {_plural(streak, 'день', 'дня', 'дней')}  |  {rank}",
-            408, F_BIG if streak < 100 else F_BODY, YELLOW)
+    # ===== серия + ранг-пилюля =====
+    _card(draw, 400, 150)
+    draw.text((100, 424), "СЕРИЯ ОПРОСОВ", fill=GRAY, font=F_LABEL)
+    draw.text((100, 460), f"{streak} {_plural(streak, 'день', 'дня', 'дней')}",
+              fill=YELLOW, font=F_STREAK)
+    bb = draw.textbbox((0, 0), rank, font=F_RANK)
+    tw = bb[2] - bb[0]
+    px0 = W - 100 - tw - 48
+    draw.rounded_rectangle([px0, 448, W - 100, 508], radius=30, fill=PILL,
+                           outline=ACCENT, width=2)
+    draw.text((px0 + 24, 462), rank, fill=ACCENT, font=F_RANK)
 
-    # ===== готовность за неделю =====
+    # ===== готовность: кольцо прогресса =====
     readiness = stats.get("avg_readiness")
     has_r = isinstance(readiness, (int, float))
     r_c = (GREEN if readiness >= 7 else (YELLOW if readiness >= 5 else RED)) if has_r else GRAY
-    _card(draw, 465, 175)
-    _center(draw, "Готовность за неделю", 488, F_CARD_TITLE, GRAY)
-    _bar(draw, 130, 555, W - 130, (readiness if has_r else 0) / 10.0, r_c)
-    val_s = f"{readiness:.1f} / 10" if has_r else "—"
-    bbox = draw.textbbox((0, 0), val_s, font=F_BIG)
-    tw = bbox[2] - bbox[0]
-    vx = (W - tw) // 2
-    draw.text((vx, 590), val_s, fill=r_c, font=F_BIG)
-    arrow_s, arrow_c = _delta_text(readiness, prev.get("avg_readiness"))
-    if arrow_s:
-        draw.text((vx + tw + 22, 610), arrow_s, fill=arrow_c, font=F_SUB)
+    _card(draw, 570, 280)
+    draw.text((100, 594), "ГОТОВНОСТЬ ЗА НЕДЕЛЮ", fill=GRAY, font=F_LABEL)
+    cx, cy, r = 240, 730, 95
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=TRACK, width=20)
+    if has_r:
+        draw.arc([cx - r, cy - r, cx + r, cy + r], start=-90,
+                 end=-90 + 360 * max(0.0, min(1.0, readiness / 10.0)), fill=r_c, width=20)
+        draw.text((cx, cy - 10), f"{readiness:.1f}", fill=TEXT, font=F_BIG, anchor="mm")
+    else:
+        draw.text((cx, cy - 10), "—", fill=GRAY, font=F_BIG, anchor="mm")
+    draw.text((cx, cy + 40), "/ 10", fill=GRAY, font=F_SMALL, anchor="mm")
+    draw.text((420, 660), "средняя за неделю", fill=GRAY, font=F_NORM)
+    dtext, dcol = _delta_sentence(readiness, prev.get("avg_readiness"))
+    draw.text((420, 706), dtext, fill=dcol, font=F_BODY)
+    draw.text((420, 756), "шкала 0–10, выше — лучше", fill=GRAY, font=F_HINT)
 
-    # ===== график сна + личная норма =====
+    # ===== сон: бары по ДАТАМ, значения одной строкой, пунктир нормы =====
     norm_sleep = bl_median.get("sleep")
     if trend_7d:
-        _card(draw, 660, 215)
-        _center(draw, "Качество сна — 7 дней", 683, F_CARD_TITLE, GRAY)
+        _card(draw, 870, 270)
+        draw.text((100, 894), "Качество сна — 7 дней", fill=TEXT, font=F_CARD_TITLE)
         if norm_sleep is not None:
-            _right(draw, f"норма {norm_sleep:.1f}", W - 130, 685, F_SMALL, GRAY)
-        _sparkline(draw, trend_7d, 130, 725, W - 130, 825, norm=norm_sleep)
+            draw.text((W - 100, 900), f"норма {norm_sleep:.1f}", fill=GRAY,
+                      font=F_NORM, anchor="rm")
+        top, bot = 960, 1090
+        slot = 880 / 7.0
+        bw = 72
+        vals = _dated_values(trend_7d, window)
+        for i in range(7):
+            x = 100 + i * slot + (slot - bw) / 2
+            draw.rounded_rectangle([x, top, x + bw, bot], radius=10, fill=TRACK)
+        if norm_sleep is not None:
+            ny = bot - norm_sleep / 10.0 * (bot - top)
+            _dashed_line(draw, 100, ny, 980, DASH)
+        for i, v in enumerate(vals):
+            x = 100 + i * slot + (slot - bw) / 2
+            wd = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"][(d0 + timedelta(days=i)).weekday()]
+            draw.text((x + bw / 2, 1100), wd, fill=GRAY, font=F_DAY, anchor="mt")
+            if isinstance(v, (int, float)):
+                h = max(6, v / 10.0 * (bot - top))
+                draw.rounded_rectangle([x, bot - h, x + bw, bot], radius=10,
+                                       fill=_score_color(v))
+                draw.text((x + bw / 2, 952), f"{v:.1f}", fill=TEXT, font=F_DAY, anchor="mb")
+            else:
+                draw.text((x + bw / 2, (top + bot) / 2), "—", fill=GRAY,
+                          font=F_DAY, anchor="mm")
 
-    # ===== тренды: готовность и пульс =====
-    trend_r = trends.get("readiness") or []
-    trend_hr = trends.get("hr") or []
-    if trend_r or trend_hr:
-        _card(draw, 895, 225)
-        _center(draw, "Тренд недели", 918, F_CARD_TITLE, GRAY)
-        if trend_r:
-            draw.text((100, 960), "Готовность", fill=GRAY, font=F_SMALL)
-            _sparkline(draw, trend_r, 100, 975, 420, 1065, color=GREEN)
-        if trend_hr:
-            _right(draw, "Пульс покоя", 800, 960, F_SMALL, GRAY)
-            _sparkline(draw, trend_hr, 480, 975, 800, 1065, color=YELLOW)
+    # ===== тренды: готовность и пульс (подписи над графиками) =====
+    trend_r = _dated_values(trends.get("readiness"), window)
+    trend_hr = _dated_values(trends.get("hr"), window)
+    if any(v is not None for v in trend_r) or any(v is not None for v in trend_hr):
+        _card(draw, 1160, 250)
+        draw.text((100, 1184), "Тренд недели", fill=TEXT, font=F_CARD_TITLE)
+        if any(v is not None for v in trend_r):
+            draw.text((100, 1230), "Готовность", fill=GRAY, font=F_TREND)
+            lr = [v for v in trend_r if v is not None]
+            draw.text((520, 1230), f"{lr[-1]:.1f}", fill=GREEN, font=F_TREND, anchor="rm")
+            _sparkline(draw, trend_r, 100, 520, 1280, 1380, GREEN)
+        if any(v is not None for v in trend_hr):
+            draw.text((560, 1230), "Пульс покоя", fill=GRAY, font=F_TREND)
+            lh = [v for v in trend_hr if v is not None]
+            draw.text((980, 1230), f"{lh[-1]:.0f}", fill=YELLOW, font=F_TREND, anchor="rm")
+            _sparkline(draw, trend_hr, 560, 980, 1280, 1380, YELLOW)
 
     # ===== средние показатели =====
     rows = [
@@ -291,12 +376,12 @@ def generate_weekly_report(full_name: str, age_group: str, team: str,
         ("Пульс покоя", stats.get("avg_hr"), True, median_hr,
          prev.get("avg_hr")),
     ]
-    _card(draw, 1140, 290)
-    _center(draw, "Средние за неделю", 1163, F_CARD_TITLE, GRAY)
-    y = 1210
+    _card(draw, 1430, 310)
+    draw.text((100, 1454), "Средние за неделю", fill=TEXT, font=F_CARD_TITLE)
+    y = 1506
     for label, val, invert, norm_val, prev_val in rows:
         _avg_row(draw, y, label, val, invert, norm_val, prev_val)
-        y += 52
+        y += 62
 
     # ===== боль и жалобы =====
     _pain_card(draw, pain or [], compact=bool(outage_note))
@@ -307,12 +392,12 @@ def generate_weekly_report(full_name: str, age_group: str, team: str,
         font = F_SMALL
         bbox = draw.textbbox((0, 0), note, font=font)
         if bbox[2] - bbox[0] > W - 120:
-            font = _font(False, 20)
-        _center(draw, note, 1552, font, YELLOW)
+            font = F_NOTE_SMALL
+        _center(draw, note, 1934, font, YELLOW)
 
     # ===== футер =====
-    draw.line([0, 1585, W, 1585], fill=LINE, width=2)
-    _center(draw, "Береги восстановление — оно решает результат!", 1610,
+    draw.line([0, 2005, W, 2005], fill=LINE, width=2)
+    _center(draw, "Береги восстановление — оно решает результат!", 2020,
             F_FOOTER, GRAY)
 
     out_dir = os.path.join(os.path.dirname(__file__), "data")
@@ -325,8 +410,9 @@ def generate_weekly_report(full_name: str, age_group: str, team: str,
 
 if __name__ == "__main__":
     import sys
-    sys.path.insert(0, os.path.dirname(__file__))
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from database import Database
+    from gamification import get_rank_plain
     db = Database()
     a = db.get_athlete_by_id(int(sys.argv[1])) if len(sys.argv) > 1 else None
     if not a:
@@ -335,14 +421,12 @@ if __name__ == "__main__":
     stats = db.get_athlete_stats(a["id"], 7)
     prev = db.get_athlete_stats_window(a["id"], 7, 7)
     baseline = db.get_individual_baseline(a["id"], 30)
-    trends = {
-        "readiness": [v for _, v in db.get_trend_data(a["id"], "readiness", 7)],
-        "hr": [v for _, v in db.get_trend_data(a["id"], "hr", 7)],
-    }
+    trends = {m: db.get_trend_data(a["id"], m, 7) for m in ("readiness", "hr")}
     pain = db.get_week_pain_summary(a["id"], 7)
     path = generate_weekly_report(
         a["full_name"], a["age_group"], a.get("team", "?"),
-        a.get("survey_streak", 0), "Новичок", a.get("total_surveys", 0),
-        stats, [v for _, v in db.get_trend_data(a["id"], "sleep", 7)],
+        a.get("survey_streak", 0), get_rank_plain(a.get("survey_streak", 0)),
+        a.get("total_surveys", 0),
+        stats, db.get_trend_data(a["id"], "sleep", 7),
         prev=prev, baseline=baseline, trends=trends, pain=pain)
     print(path)

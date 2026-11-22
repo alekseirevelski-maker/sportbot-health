@@ -147,46 +147,50 @@ def test_weekly_png_renders_outage_note(tmp_path, monkeypatch):
     assert with_note != without, "пометка должна быть видна на картинке"
     from PIL import Image
     img = Image.open(io.BytesIO(with_note))
-    assert img.size == (900, 1640)
+    assert img.size == (1080, 2060)
 
 
 def test_weekly_png_note_does_not_overlap_pain_block(tmp_path, monkeypatch):
-    """Пометка на y=1552 не должна накладываться на 3-ю строку блока боли (y=1545).
+    """Пометка на y=1934 не должна накладываться на блок боли (карточка до y=1910).
 
-    При пометке блок «Боль и жалобы» сжимается до 2 строк (последняя на y=1513).
-    Без пометки прежняя раскладка (3 строки, «и ещё» на y=1545) сохраняется.
+    При пометке блок «Боль и жалобы» сжимается: 1 строка жалобы + «и ещё» (y=1858).
+    Без пометки: 2 строки + «и ещё» на y=1894. Строки боли левые (draw.text),
+    пометка и футер — через _center; шпионим все вызовы ImageDraw.text.
     """
     import weekly_report
+    from PIL import ImageDraw
     from outage import outage_note_for_period
     calls = []
-    orig_center = weekly_report._center
+    orig_text = ImageDraw.ImageDraw.text
 
-    def spy(draw, text, y, font, fill):
-        calls.append((text, y))
-        return orig_center(draw, text, y, font, fill)
+    def spy(self, xy, text, fill=None, font=None, anchor=None, **kw):
+        calls.append((str(text), xy[0], xy[1]))
+        return orig_text(self, xy, text, fill=fill, font=font, anchor=anchor, **kw)
 
-    monkeypatch.setattr(weekly_report, "_center", spy)
+    monkeypatch.setattr(ImageDraw.ImageDraw, "text", spy)
     monkeypatch.setattr(weekly_report, "__file__", str(tmp_path / "weekly_report.py"))
     pain = [{"survey_date": (TODAY - timedelta(days=i)).isoformat(),
              "pain_nrs": 4, "pain_location": "колено"} for i in range(1, 5)]
     note = outage_note_for_period({OUTAGE}, TODAY - timedelta(days=6), TODAY)
+    base = dict(full_name="Тестовый Спортсмен", age_group="U17", team="ЧБК",
+                streak=31, rank="Мониторинг-машина", total=40,
+                stats={"avg_readiness": 7.0, "avg_sleep": 6.0},
+                trend_7d=[6, 5, 6, 5, 6, 5, 6])
 
-    weekly_report.generate_weekly_report(
-        full_name="Тестовый Спортсмен", age_group="U17", team="ЧБК",
-        streak=31, rank="Мониторинг-машина", total=40,
-        stats={"avg_readiness": 7.0, "avg_sleep": 6.0},
-        trend_7d=[6, 5, 6, 5, 6, 5, 6], pain=pain, outage_note=note)
-    assert any("и ещё" in t and y == 1513 for t, y in calls), calls
-    assert not any(y == 1545 for _t, y in calls), "3-я строка боли не рисуется при пометке"
-    assert any(y == 1552 for _t, y in calls), "пометка на месте"
+    weekly_report.generate_weekly_report(pain=pain, outage_note=note, **base)
+    pain_rows = [(t, y) for t, x, y in calls if t[:2].isdigit() and "-" in t[:5]]
+    assert len(pain_rows) == 1 and pain_rows[0][1] == 1822, pain_rows
+    assert any("и ещё" in t and y == 1858 for t, x, y in calls), calls
+    assert not any(y >= 1910 and ("и ещё" in t or t[:2].isdigit()) for t, x, y in calls), \
+        "строки боли не выходят за карточку (до y=1910)"
+    assert any("сбой" in t.lower() and y == 1934 for t, x, y in calls), "пометка на месте"
 
     calls.clear()
-    weekly_report.generate_weekly_report(
-        full_name="Тестовый Спортсмен", age_group="U17", team="ЧБК",
-        streak=31, rank="Мониторинг-машина", total=40,
-        stats={"avg_readiness": 7.0, "avg_sleep": 6.0},
-        trend_7d=[6, 5, 6, 5, 6, 5, 6], pain=pain)
-    assert any("и ещё" in t and y == 1545 for t, y in calls), "без пометки раскладка прежняя"
+    weekly_report.generate_weekly_report(pain=pain, **base)
+    pain_rows = [(t, y) for t, x, y in calls if t[:2].isdigit() and "-" in t[:5]]
+    assert len(pain_rows) == 2, pain_rows
+    assert any("и ещё" in t and y == 1894 for t, x, y in calls), "без пометки 3 строки"
+    assert not any(y == 1934 for t, x, y in calls), "пометки нет — строка не рисуется"
 
 
 # ==================== текстовый отчёт по атлету ====================
